@@ -201,7 +201,7 @@ func run() error {
 	metrics := obs.NewMetrics(prometheus.DefaultRegisterer)
 	clock := memory.Clock{}
 
-	var transactionRepository ports.TransactionRepository = memory.NewTransactionRepository()
+	var transactionRepository ports.TransactionRepository
 	var subscriptionRepository ports.SubscriptionRepository = memory.NewSubscriptionRepository()
 	var tokenRepository ports.VirtualTokenRepository = memory.NewVirtualTokenRepository()
 	var detectionOutbox ports.DetectionOutbox

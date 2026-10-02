@@ -4,11 +4,19 @@ linters:
   default: standard
   enable:
     - errorlint
-    - copylocks
     - nilerr
     - unconvert
     - unparam
     - wastedassign
+  settings:
+    errcheck:
+      # Отложенная очистка ресурсов: ошибка Close/Rollback в defer
+      # не обрабатываема и не влияет на результат операции.
+      exclude-functions:
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (io.ReadCloser).Close
 
 formatters:
   enable:
