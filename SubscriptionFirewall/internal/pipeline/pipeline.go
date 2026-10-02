@@ -2,64 +2,82 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"subscriptionfirewall/internal/detector"
 	"subscriptionfirewall/internal/domain"
 	"subscriptionfirewall/internal/obs"
+	"subscriptionfirewall/internal/ports"
 	"subscriptionfirewall/internal/subscription"
 	"subscriptionfirewall/internal/token"
 )
 
+const (
+	claimBatchSize      = 16
+	claimRetryDelay     = time.Second
+	maintenanceInterval = time.Minute
+	staleItemAfter      = 5 * time.Minute
+)
+
 type Pipeline struct {
+	outbox        ports.DetectionOutbox
 	detector      *detector.Detector
 	subscriptions *subscription.Service
 	tokens        *token.Service
 	metrics       *obs.Metrics
 	logger        *slog.Logger
-	queue         chan domain.UserID
-	workers       sync.WaitGroup
-	queueClosed   sync.Once
+
+	workers sync.WaitGroup
+	cancel  context.CancelFunc
+	stopped atomic.Bool
 }
 
 func New(
+	outbox ports.DetectionOutbox,
 	detectorService *detector.Detector,
 	subscriptions *subscription.Service,
 	tokens *token.Service,
 	metrics *obs.Metrics,
 	logger *slog.Logger,
-	queueCapacity int,
 ) *Pipeline {
 	return &Pipeline{
+		outbox:        outbox,
 		detector:      detectorService,
 		subscriptions: subscriptions,
 		tokens:        tokens,
 		metrics:       metrics,
 		logger:        logger,
-		queue:         make(chan domain.UserID, queueCapacity),
-	}
-}
-
-func (p *Pipeline) Enqueue(userID domain.UserID) {
-	select {
-	case p.queue <- userID:
-	default:
-		p.metrics.CountEnqueueDropped()
-		p.logger.Warn("detection queue full, user dropped", "user_id", string(userID))
 	}
 }
 
 func (p *Pipeline) Start(ctx context.Context, workerCount int) {
+	workerContext, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+
 	for range workerCount {
 		p.workers.Add(1)
-		go p.workerLoop(ctx)
+		go p.workerLoop(workerContext)
 	}
+	p.workers.Add(1)
+	go p.maintenanceLoop(workerContext)
+
 	p.logger.Info("detection pipeline started", "workers", workerCount)
 }
 
 func (p *Pipeline) Stop() {
-	p.queueClosed.Do(func() { close(p.queue) })
+	if p.stopped.CompareAndSwap(false, true) {
+		if closer, ok := p.outbox.(interface{ Close() }); ok {
+			closer.Close()
+		}
+		if p.cancel != nil {
+			p.cancel()
+		}
+	}
 	p.workers.Wait()
 	p.logger.Info("detection pipeline stopped")
 }
@@ -67,32 +85,64 @@ func (p *Pipeline) Stop() {
 func (p *Pipeline) workerLoop(ctx context.Context) {
 	defer p.workers.Done()
 	for {
-		select {
-		case <-ctx.Done():
+		items, err := p.outbox.ClaimBatch(ctx, claimBatchSize)
+
+		for _, item := range items {
+			p.processItem(ctx, item)
+		}
+		switch {
+		case errors.Is(err, ports.ErrOutboxClosed), errors.Is(err, context.Canceled):
 			return
-		case userID, ok := <-p.queue:
-			if !ok {
+		case err != nil:
+			p.logger.Error("claim detection jobs failed", "error", err)
+			if !sleepContext(ctx, claimRetryDelay) {
 				return
 			}
-			p.processUser(ctx, userID)
+			continue
+		}
+		if len(items) == 0 {
+
+			if !sleepContext(ctx, claimRetryDelay) {
+				return
+			}
 		}
 	}
 }
 
-func (p *Pipeline) processUser(ctx context.Context, userID domain.UserID) {
+func (p *Pipeline) processItem(ctx context.Context, item ports.OutboxItem) {
 	p.metrics.CountDetectionRun()
 
-	detections, err := p.detector.Detect(ctx, userID)
-	if err != nil {
-		p.logger.Error("detection failed", "user_id", string(userID), "error", err)
+	if err := p.runDetection(ctx, item.UserID); err != nil {
+		p.logger.Error("detection failed, job will be retried",
+			"user_id", string(item.UserID),
+			"attempt", item.Attempts,
+			"error", err,
+		)
+		if err := p.outbox.Fail(ctx, item); err != nil {
+			p.logger.Error("mark detection job failed", "job_id", item.ID, "error", err)
+		}
 		return
 	}
-	for _, detected := range detections {
-		p.applyDetection(ctx, detected)
+	if err := p.outbox.Complete(ctx, []int64{item.ID}); err != nil {
+		p.logger.Error("complete detection job", "job_id", item.ID, "error", err)
 	}
 }
 
-func (p *Pipeline) applyDetection(ctx context.Context, detected domain.DetectedSubscription) {
+func (p *Pipeline) runDetection(ctx context.Context, userID domain.UserID) error {
+	detections, err := p.detector.Detect(ctx, userID)
+	fmt.Println("DEBUG detect:", userID, "->", len(detections), "detections, err =", err)
+	if err != nil {
+		return err
+	}
+	for _, detected := range detections {
+		if err := p.applyDetection(ctx, detected); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Pipeline) applyDetection(ctx context.Context, detected domain.DetectedSubscription) error {
 	virtualToken, err := p.tokens.EnsureToken(ctx, detected.UserID, detected.MerchantID)
 	if err != nil {
 		p.logger.Error("virtual token provisioning failed",
@@ -100,7 +150,7 @@ func (p *Pipeline) applyDetection(ctx context.Context, detected domain.DetectedS
 			"merchant_id", string(detected.MerchantID),
 			"error", err,
 		)
-		return
+		return err
 	}
 	subscription, err := p.subscriptions.ApplyDetection(ctx, detected, string(virtualToken.ID))
 	if err != nil {
@@ -109,7 +159,7 @@ func (p *Pipeline) applyDetection(ctx context.Context, detected domain.DetectedS
 			"merchant_id", string(detected.MerchantID),
 			"error", err,
 		)
-		return
+		return err
 	}
 	p.metrics.CountSubscriptionDetected(string(subscription.State))
 	p.logger.Info("subscription detected",
@@ -119,4 +169,40 @@ func (p *Pipeline) applyDetection(ctx context.Context, detected domain.DetectedS
 		"state", string(subscription.State),
 		"billing_window", string(subscription.BillingWindow),
 	)
+	return nil
+}
+
+func (p *Pipeline) maintenanceLoop(ctx context.Context) {
+	defer p.workers.Done()
+	ticker := time.NewTicker(maintenanceInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		requeued, err := p.outbox.RequeueStale(ctx, staleItemAfter)
+		if err != nil {
+			p.logger.Error("requeue stale detection jobs failed", "error", err)
+		} else if requeued > 0 {
+			p.logger.Warn("requeued stale detection jobs", "count", requeued)
+		}
+		if pending, err := p.outbox.PendingCount(ctx); err == nil {
+			p.metrics.SetQueueDepth(int(pending))
+		}
+	}
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }

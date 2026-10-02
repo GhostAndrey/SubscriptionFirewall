@@ -36,12 +36,39 @@ func (s *Service) ListByUser(ctx context.Context, userID domain.UserID) ([]*doma
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions for user %s: %w", userID, err)
 	}
+	return subscriptions, nil
+}
+
+func (s *Service) GetByUserAndMerchant(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (*domain.Subscription, error) {
+	subscription, err := s.subscriptions.FindByUserAndMerchant(ctx, userID, merchantID)
+	if err != nil {
+		return nil, fmt.Errorf("find subscription for user %s merchant %s: %w", userID, merchantID, err)
+	}
+	return subscription, nil
+}
+
+func (s *Service) Sweep(ctx context.Context) ([]*domain.Subscription, error) {
+	subscriptions, err := s.subscriptions.ListAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list subscriptions for sweep: %w", err)
+	}
+
+	now := s.clock.Now()
+	changed := make([]*domain.Subscription, 0)
 	for _, subscription := range subscriptions {
-		if err := subscription.MarkMissed(s.clock.Now()); err != nil {
+		before := subscription.State
+		if err := subscription.MarkMissed(now); err != nil {
 			return nil, fmt.Errorf("mark subscription %s missed: %w", subscription.ID, err)
 		}
+		if subscription.State == before {
+			continue
+		}
+		if err := s.subscriptions.Save(ctx, subscription); err != nil {
+			return nil, fmt.Errorf("persist subscription %s: %w", subscription.ID, err)
+		}
+		changed = append(changed, subscription)
 	}
-	return subscriptions, nil
+	return changed, nil
 }
 
 func (s *Service) Freeze(ctx context.Context, id domain.SubscriptionID) (*domain.Subscription, error) {

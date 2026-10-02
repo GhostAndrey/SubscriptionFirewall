@@ -34,6 +34,5 @@ type Transaction struct {
 	MCC          MCC
 	AmountMinor  int64
 	Currency     string
-	CardPAN      string
 	AuthorizedAt time.Time
 }

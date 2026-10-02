@@ -1,0 +1,503 @@
+openapi: 3.1.0
+info:
+  title: Subscription Firewall API
+  description: |
+    Микросервис, который находит регулярные списания (подписки) в потоке
+    транзакций, привязывает их к одноразовым виртуальным картам с месячным
+    лимитом и позволяет управлять жизненным циклом подписок и карт.
+
+    Аутентификация: заголовок `X-API-Key` или `Authorization: Bearer <key>`.
+    Формат ключей: `ключ:скоуп1,скоуп2`; ключ без скоупов имеет полный доступ.
+    Скоупы: `ingest` — инжест транзакций, `read` — все GET, `manage` —
+    freeze/reactivate/terminate и авторизация списаний, `full` — всё сразу.
+
+    Каждый ответ содержит заголовок `X-Request-Id` (или пробрасывает входящий);
+    передавайте его при обращениях в поддержку.
+  version: 1.0.0
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Локальный запуск
+
+security:
+  - ApiKey: []
+
+tags:
+  - name: system
+  - name: transactions
+  - name: subscriptions
+  - name: tokens
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      tags: [system]
+      summary: Liveness-проба (без аутентификации)
+      security: []
+      responses:
+        "200":
+          description: Процесс жив
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /readyz:
+    get:
+      operationId: getReadiness
+      tags: [system]
+      summary: Readiness-проба (без аутентификации)
+      description: Проверяет готовность обслуживать трафик, включая доступность БД.
+      security: []
+      responses:
+        "200":
+          description: Готов
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ready }
+        "503":
+          description: Не готов (например, БД недоступна)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: unavailable }
+
+  /version:
+    get:
+      operationId: getVersion
+      tags: [system]
+      summary: Версия сборки (без аутентификации)
+      security: []
+      responses:
+        "200":
+          description: Метаданные сборки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string, example: v1.0.0 }
+                  commit: { type: string, example: b401bbd }
+                  build_date: { type: string, example: "2026-10-02T10:00:00Z" }
+
+  /v1/transactions:
+    post:
+      operationId: ingestTransaction
+      tags: [transactions]
+      summary: Инжест транзакции
+      description: |
+        Сохраняет транзакцию (PAN не хранится, передаётся только для маскирования
+        в логах) и ставит пользователя в очередь детекции. Идемпотентен по `id`.
+        Требует скоуп `ingest`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionInput"
+      responses:
+        "202":
+          description: Принято
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Accepted"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /v1/users/{user_id}/subscriptions:
+    get:
+      operationId: listUserSubscriptions
+      tags: [subscriptions]
+      summary: Подписки пользователя
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Список подписок
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Subscription"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/subscriptions/{id}:
+    get:
+      operationId: getSubscription
+      tags: [subscriptions]
+      summary: Подписка по id
+      parameters:
+        - $ref: "#/components/parameters/SubscriptionId"
+      responses:
+        "200":
+          description: Подписка
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/subscriptions/{id}/freeze:
+    post:
+      operationId: freezeSubscription
+      tags: [subscriptions]
+      summary: Заморозить подписку
+      description: Замораживает подписку и связанную виртуальную карту. Тело запроса не требуется.
+      parameters:
+        - $ref: "#/components/parameters/SubscriptionId"
+      responses:
+        "200":
+          description: Подписка в состоянии Frozen
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/subscriptions/{id}/reactivate:
+    post:
+      operationId: reactivateSubscription
+      tags: [subscriptions]
+      summary: Реактивировать подписку
+      parameters:
+        - $ref: "#/components/parameters/SubscriptionId"
+      responses:
+        "200":
+          description: Подписка в состоянии Active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/subscriptions/{id}/terminate:
+    post:
+      operationId: terminateSubscription
+      tags: [subscriptions]
+      summary: Завершить подписку
+      parameters:
+        - $ref: "#/components/parameters/SubscriptionId"
+      responses:
+        "200":
+          description: Подписка в состоянии Terminated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Subscription"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/users/{user_id}/tokens:
+    get:
+      operationId: listUserTokens
+      tags: [tokens]
+      summary: Виртуальные карты пользователя
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Список карт
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VirtualToken"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/tokens/{id}:
+    get:
+      operationId: getToken
+      tags: [tokens]
+      summary: Виртуальная карта по id
+      parameters:
+        - $ref: "#/components/parameters/TokenId"
+      responses:
+        "200":
+          description: Карта
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VirtualToken"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/tokens/{id}/freeze:
+    post:
+      operationId: freezeToken
+      tags: [tokens]
+      summary: Заморозить карту
+      description: Замораживает карту и связанную подписку.
+      parameters:
+        - $ref: "#/components/parameters/TokenId"
+      responses:
+        "200":
+          description: Карта в состоянии Frozen
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VirtualToken"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/tokens/{id}/reactivate:
+    post:
+      operationId: reactivateToken
+      tags: [tokens]
+      summary: Реактивировать карту
+      parameters:
+        - $ref: "#/components/parameters/TokenId"
+      responses:
+        "200":
+          description: Карта в состоянии Active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VirtualToken"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/tokens/{id}/terminate:
+    post:
+      operationId: terminateToken
+      tags: [tokens]
+      summary: Завершить карту
+      parameters:
+        - $ref: "#/components/parameters/TokenId"
+      responses:
+        "200":
+          description: Карта в состоянии Terminated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VirtualToken"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/tokens/{id}/authorize:
+    post:
+      operationId: authorizeCharge
+      tags: [tokens]
+      summary: Авторизация списания по карте
+      description: |
+        Проверяет, что карта активна, и что месячный лимит позволяет списание.
+        Требует скоуп `manage`.
+      parameters:
+        - $ref: "#/components/parameters/TokenId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthorizeChargeInput"
+      responses:
+        "200":
+          description: Списание одобрено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: approved }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "402":
+          description: Превышен месячный лимит карты
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Карта не активна
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Альтернатива — `Authorization: Bearer <key>`.
+
+  parameters:
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema: { type: string }
+    SubscriptionId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    TokenId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+
+  responses:
+    BadRequest:
+      description: Ошибка валидации
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Нет или неверный API-ключ
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Не хватает скоупа (или карта не активна)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Не найдено
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Дубликат или недопустимый переход состояния
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Rate limit превышен
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Accepted:
+      type: object
+      properties:
+        status: { type: string, example: accepted }
+
+    TransactionInput:
+      type: object
+      required: [id, user_id, merchant_id, amount_minor, currency, authorized_at]
+      properties:
+        id:
+          type: string
+          description: Уникальный id транзакции (идемпотентность инжеста).
+        user_id: { type: string }
+        merchant_id: { type: string }
+        merchant_name:
+          type: string
+        mcc:
+          type: integer
+          format: int32
+          description: Merchant category code.
+        amount_minor:
+          type: integer
+          format: int64
+          description: Сумма в минорных единицах.
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+        card_pan:
+          type: string
+          description: В логах сохраняется только маскированное значение.
+        authorized_at:
+          type: string
+          format: date-time
+
+    AuthorizeChargeInput:
+      type: object
+      required: [amount_minor, currency]
+      properties:
+        amount_minor:
+          type: integer
+          format: int64
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+
+    Subscription:
+      type: object
+      properties:
+        id: { type: string }
+        user_id: { type: string }
+        merchant_id: { type: string }
+        merchant_name: { type: string }
+        virtual_token_id: { type: string }
+        state:
+          type: string
+          enum: [Active, Trial, Zombie, Frozen, Terminated]
+        billing_window: { type: string }
+        average_amount_minor: { type: integer, format: int64 }
+        currency: { type: string }
+        last_charged_at: { type: string, format: date-time }
+        next_expected_at: { type: string, format: date-time }
+
+    VirtualToken:
+      type: object
+      properties:
+        id: { type: string }
+        user_id: { type: string }
+        merchant_id: { type: string }
+        masked_pan: { type: string, example: "4111 **** **** 1234" }
+        monthly_limit_minor: { type: integer, format: int64 }
+        spent_in_period_minor: { type: integer, format: int64 }
+        currency: { type: string }
+        state:
+          type: string
+          enum: [Active, Frozen, Terminated]

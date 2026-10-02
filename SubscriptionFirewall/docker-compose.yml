@@ -1,0 +1,47 @@
+services:
+  firewall:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SUBSCRIPTION_FIREWALL_ADDRESS: ":8080"
+      SUBSCRIPTION_FIREWALL_API_KEYS: "${SUBSCRIPTION_FIREWALL_API_KEYS:?set SUBSCRIPTION_FIREWALL_API_KEYS in .env}"
+      SUBSCRIPTION_FIREWALL_WORKERS: "4"
+      SUBSCRIPTION_FIREWALL_QUEUE_CAPACITY: "1024"
+      SUBSCRIPTION_FIREWALL_SWEEP_INTERVAL: "1m"
+      SUBSCRIPTION_FIREWALL_ISSUER_MONTHLY_LIMIT: "100000"
+      SUBSCRIPTION_FIREWALL_LOG_LEVEL: "${SUBSCRIPTION_FIREWALL_LOG_LEVEL:-info}"
+      # По умолчанию — MySQL из этого compose-файла. Для БД на хосте задайте в .env:
+      # SUBSCRIPTION_FIREWALL_DB_DSN: "firewall:пароль@tcp(host.docker.internal:3306)/subscription_firewall?parseTime=true&loc=UTC"
+      SUBSCRIPTION_FIREWALL_DB_DSN: "${SUBSCRIPTION_FIREWALL_DB_DSN:-firewall:${SUBSCRIPTION_FIREWALL_DB_PASSWORD:-firewall}@tcp(mysql:3306)/subscription_firewall?parseTime=true&loc=UTC}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/firewall", "healthcheck"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: subscription_firewall
+      MYSQL_USER: firewall
+      MYSQL_PASSWORD: "${SUBSCRIPTION_FIREWALL_DB_PASSWORD:-firewall}"
+      MYSQL_ROOT_PASSWORD: "${SUBSCRIPTION_FIREWALL_DB_ROOT_PASSWORD:-firewall-root}"
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${SUBSCRIPTION_FIREWALL_DB_ROOT_PASSWORD:-firewall-root}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  mysql-data:

@@ -1,0 +1,8 @@
+# Локальные секреты (см. .env.example)
+.env
+
+# Артефакты сборки и тестов
+coverage.txt
+firewall
+firewall.exe
+/dist/

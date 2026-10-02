@@ -1,7 +1,12 @@
 package obs
 
 import (
+	"strconv"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
+
+	"subscriptionfirewall/internal/version"
 )
 
 type Metrics struct {
@@ -11,6 +16,9 @@ type Metrics struct {
 	tokenAuthorizations   *prometheus.CounterVec
 	tokensFrozen          prometheus.Counter
 	enqueueDropped        prometheus.Counter
+	httpRequests          *prometheus.CounterVec
+	httpDuration          *prometheus.HistogramVec
+	queueDepth            prometheus.Gauge
 }
 
 func NewMetrics(registerer prometheus.Registerer) *Metrics {
@@ -45,8 +53,36 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			Name:      "detection_enqueue_dropped_total",
 			Help:      "Detection requests dropped because the queue was full.",
 		}),
+		httpRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "subscription_firewall",
+			Name:      "http_requests_total",
+			Help:      "HTTP requests by method, route and status code.",
+		}, []string{"method", "route", "status"}),
+		httpDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "subscription_firewall",
+			Name:      "http_request_duration_seconds",
+			Help:      "HTTP request latency by method and route.",
+			Buckets:   prometheus.DefBuckets,
+		}, []string{"method", "route"}),
+		queueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "subscription_firewall",
+			Name:      "detection_queue_depth",
+			Help:      "Current number of users waiting for detection.",
+		}),
 	}
 	if registerer != nil {
+		registerer.MustRegister(
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Namespace: "subscription_firewall",
+				Name:      "build_info",
+				Help:      "Build metadata; value is always 1.",
+				ConstLabels: prometheus.Labels{
+					"version":    version.Version,
+					"commit":     version.Commit,
+					"build_date": version.BuildDate,
+				},
+			}, func() float64 { return 1 }),
+		)
 		registerer.MustRegister(
 			metrics.transactionsIngested,
 			metrics.detectionRuns,
@@ -54,6 +90,9 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			metrics.tokenAuthorizations,
 			metrics.tokensFrozen,
 			metrics.enqueueDropped,
+			metrics.httpRequests,
+			metrics.httpDuration,
+			metrics.queueDepth,
 		)
 	}
 	return metrics
@@ -68,4 +107,12 @@ func (m *Metrics) CountSubscriptionDetected(state string) {
 }
 func (m *Metrics) CountTokenAuthorization(result string) {
 	m.tokenAuthorizations.WithLabelValues(result).Inc()
+}
+func (m *Metrics) SetQueueDepth(depth int) {
+	m.queueDepth.Set(float64(depth))
+}
+func (m *Metrics) ObserveHTTPRequest(method, route string, status int, duration time.Duration) {
+	statusCode := strconv.Itoa(status)
+	m.httpRequests.WithLabelValues(method, route, statusCode).Inc()
+	m.httpDuration.WithLabelValues(method, route).Observe(duration.Seconds())
 }

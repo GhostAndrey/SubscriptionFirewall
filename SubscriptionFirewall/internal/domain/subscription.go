@@ -110,10 +110,14 @@ func (s *Subscription) MarkMissed(now time.Time) error {
 }
 
 func (s *Subscription) ObserveActivity(lastChargedAt time.Time, averageAmount int64, observedPayments int) error {
-	if s.State == SubscriptionTerminated {
+	switch s.State {
+	case SubscriptionTerminated:
 		return fmt.Errorf("subscription %s is terminated: %w", s.ID, ErrInvalidTransition)
+	case SubscriptionFrozen:
+
+	default:
+		s.State = SubscriptionActive
 	}
-	s.State = SubscriptionActive
 	s.AverageAmount = averageAmount
 	s.LastChargedAt = lastChargedAt
 	s.NextExpectedAt = lastChargedAt.Add(s.BillingWindow.Duration())

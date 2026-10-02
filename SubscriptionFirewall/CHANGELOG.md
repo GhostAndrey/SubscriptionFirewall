@@ -1,0 +1,20 @@
+# Changelog
+
+Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
+версионирование — [SemVer](https://semver.org/lang/ru/).
+
+## [Unreleased]
+
+### Added
+
+- `GET /readyz` — readiness-проба с проверкой доступности БД (503, если БД недоступна).
+- `GET /version` — версия, commit и дата сборки; метрика `subscription_firewall_build_info`.
+- `HEALTHCHECK` в Dockerfile и docker-compose через подкоманду `firewall healthcheck`.
+- Request-id: middleware `X-Request-Id` (генерация или проброс входящего), request_id в логах запросов и echoed в ответах.
+- OpenAPI-спецификация API: `api/openapi.yaml`.
+- MySQL в docker-compose с healthcheck; стек поднимается одной командой `docker compose up`.
+- Интеграционные тесты MySQL-адаптера в CI (сервис mysql в workflow).
+- Публикация Docker-образа в GHCR (`.github/workflows/release.yml`), Dependabot.
+- Env-конфигурация: уровня логов (`SUBSCRIPTION_FIREWALL_LOG_LEVEL`), пула БД (`SUBSCRIPTION_FIREWALL_DB_MAX_OPEN_CONNS`, `_MAX_IDLE_CONNS`, `_CONN_MAX_LIFETIME`), таймаутов HTTP (`SUBSCRIPTION_FIREWALL_READ_TIMEOUT`, `_WRITE_TIMEOUT`, `_SHUTDOWN_TIMEOUT`).
+- `SUBSCRIPTION_FIREWALL_STORAGE=auto|memory|mysql` — явный выбор хранилища (по умолчанию auto: mysql при заданном DSN, иначе memory).
+- `.env.example`, `LICENSE`, этот CHANGELOG; цели `test-race` и `cover` в Makefile.

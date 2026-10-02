@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,6 +25,17 @@ func (r *TransactionRepository) Save(_ context.Context, transaction domain.Trans
 	defer r.mu.Unlock()
 	r.transactions[transaction.ID] = transaction
 	return nil
+}
+
+func (r *TransactionRepository) GetByID(_ context.Context, id domain.TransactionID) (*domain.Transaction, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	transaction, ok := r.transactions[id]
+	if !ok {
+		return nil, fmt.Errorf("transaction %s: %w", id, domain.ErrNotFound)
+	}
+	return &transaction, nil
 }
 
 func (r *TransactionRepository) ListByUserSince(_ context.Context, userID domain.UserID, since time.Time) ([]domain.Transaction, error) {
@@ -97,7 +109,26 @@ func (r *SubscriptionRepository) ListByUser(_ context.Context, userID domain.Use
 			listed = append(listed, cloneSubscription(subscription))
 		}
 	}
+	sortSubscriptionsByID(listed)
 	return listed, nil
+}
+
+func (r *SubscriptionRepository) ListAll(_ context.Context) ([]*domain.Subscription, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	listed := make([]*domain.Subscription, 0, len(r.subscriptions))
+	for _, subscription := range r.subscriptions {
+		listed = append(listed, cloneSubscription(subscription))
+	}
+	sortSubscriptionsByID(listed)
+	return listed, nil
+}
+
+func sortSubscriptionsByID(subscriptions []*domain.Subscription) {
+	sort.Slice(subscriptions, func(i, j int) bool {
+		return subscriptions[i].ID < subscriptions[j].ID
+	})
 }
 
 func cloneSubscription(subscription *domain.Subscription) *domain.Subscription {
@@ -129,7 +160,7 @@ func (r *VirtualTokenRepository) GetByID(_ context.Context, id domain.VirtualTok
 	if !ok {
 		return nil, fmt.Errorf("virtual token %s: %w", id, domain.ErrNotFound)
 	}
-	return token, nil
+	return cloneToken(token), nil
 }
 
 func (r *VirtualTokenRepository) FindByUserAndMerchant(_ context.Context, userID domain.UserID, merchantID domain.MerchantID) (*domain.VirtualToken, error) {
@@ -138,7 +169,7 @@ func (r *VirtualTokenRepository) FindByUserAndMerchant(_ context.Context, userID
 
 	for _, token := range r.tokens {
 		if token.UserID == userID && token.MerchantID == merchantID {
-			return token, nil
+			return cloneToken(token), nil
 		}
 	}
 	return nil, fmt.Errorf("virtual token for user %s merchant %s: %w", userID, merchantID, domain.ErrNotFound)
@@ -151,10 +182,26 @@ func (r *VirtualTokenRepository) ListByUser(_ context.Context, userID domain.Use
 	listed := make([]*domain.VirtualToken, 0, len(r.tokens))
 	for _, token := range r.tokens {
 		if token.UserID == userID {
-			listed = append(listed, token)
+			listed = append(listed, cloneToken(token))
 		}
 	}
+	sort.Slice(listed, func(i, j int) bool { return listed[i].ID < listed[j].ID })
 	return listed, nil
+}
+
+func cloneToken(token *domain.VirtualToken) *domain.VirtualToken {
+	snapshot := token.Snapshot()
+	return &domain.VirtualToken{
+		ID:            snapshot.ID,
+		UserID:        snapshot.UserID,
+		MerchantID:    snapshot.MerchantID,
+		MaskedPAN:     snapshot.MaskedPAN,
+		MonthlyLimit:  snapshot.MonthlyLimit,
+		SpentInPeriod: snapshot.SpentInPeriod,
+		Currency:      snapshot.Currency,
+		State:         snapshot.State,
+		PeriodStarted: snapshot.PeriodStarted,
+	}
 }
 
 type Clock struct{}

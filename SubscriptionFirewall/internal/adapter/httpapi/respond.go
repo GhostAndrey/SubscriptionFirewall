@@ -25,6 +25,8 @@ func writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: err.Error()})
+	case errors.Is(err, domain.ErrAlreadyExists):
+		writeJSON(w, http.StatusConflict, ErrorResponse{Error: err.Error()})
 	case errors.Is(err, domain.ErrInvalidTransition):
 		writeJSON(w, http.StatusConflict, ErrorResponse{Error: err.Error()})
 	case errors.Is(err, domain.ErrSpendLimitExceeded):
@@ -38,22 +40,16 @@ func writeError(w http.ResponseWriter, err error) {
 	}
 }
 
+const maxRequestBodyBytes = 1 << 20
+
 func decodeJSON[T any](r *http.Request) (T, error) {
 	defer r.Body.Close()
 
 	var target T
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxRequestBodyBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&target); err != nil {
 		return target, fmt.Errorf("decode request body: %w", err)
 	}
 	return target, nil
-}
-
-func isSpendLimitExceeded(err error) bool {
-	return errors.Is(err, domain.ErrSpendLimitExceeded)
-}
-
-func isTokenNotActive(err error) bool {
-	return errors.Is(err, domain.ErrTokenNotActive)
 }
