@@ -84,9 +84,17 @@ curl -H "X-API-Key: local-dev-key" http://localhost:8080/v1/users/user-1/subscri
 | `SUBSCRIPTION_FIREWALL_WRITE_TIMEOUT` | `10s` | HTTP write timeout |
 | `SUBSCRIPTION_FIREWALL_SHUTDOWN_TIMEOUT` | `10s` | Таймаут graceful shutdown |
 | `SUBSCRIPTION_FIREWALL_RATE_LIMIT` | `100` | Запросов в секунду на клиентский IP (0 — выключить) |
-| `SUBSCRIPTION_FIREWALL_RATE_BURST` | `200` | Допустимый burst сверх лимита |
+| `SUBSCRIPTION_FIREWALL_RATE_BURST` | `200` | Допустимый burst сверх лимита (in-memory limiter) |
+| `SUBSCRIPTION_FIREWALL_REDIS_ADDR` | — | Адрес Redis; при заданном rate limit общий для всех реплик |
+| `SUBSCRIPTION_FIREWALL_REDIS_PASSWORD` | — | Пароль Redis (если требуется) |
+| `SUBSCRIPTION_FIREWALL_OTLP_ENDPOINT` | — | OTLP-эндпоинт трейсинга (`host:port`); без переменной трейсинг выключен |
+| `SUBSCRIPTION_FIREWALL_OTLP_INSECURE` | `true` | Экспорт трейсов по http (без TLS) |
+| `SUBSCRIPTION_FIREWALL_ISSUER_TIMEOUT` | `5s` | Таймаут одного вызова эмитента карт |
+| `SUBSCRIPTION_FIREWALL_ISSUER_RETRIES` | `2` | Повторы после первой неудачи |
+| `SUBSCRIPTION_FIREWALL_ISSUER_BREAKER_THRESHOLD` | `5` | Подряд неудач, открывающих circuit breaker |
+| `SUBSCRIPTION_FIREWALL_ISSUER_BREAKER_COOLDOWN` | `30s` | Пауза breaker-а до пробного вызова |
 
-Пример DSN: `firewall:пароль@tcp(127.0.0.1:3306)/subscription_firewall?parseTime=true&loc=UTC`. Схема (`transactions`, `subscriptions`, `virtual_tokens`) создаётся автоматически при старте. Интеграционные тесты адаптера запускаются при заданном `SUBSCRIPTION_FIREWALL_TEST_DSN`.
+Пример DSN: `firewall:пароль@tcp(127.0.0.1:3306)/subscription_firewall?parseTime=true&loc=UTC`. Схема применяется версионированными миграциями [goose](https://pressly.github.io/goose/) (SQL-файлы в `internal/adapter/mysql/migrations`) при старте — повторный запуск безопасен. Интеграционные тесты адаптера запускаются при заданном `SUBSCRIPTION_FIREWALL_TEST_DSN`.
 
 ## API
 
@@ -115,6 +123,7 @@ curl -H "X-API-Key: local-dev-key" http://localhost:8080/v1/users/user-1/subscri
 
 - **Request-id**: каждый ответ содержит `X-Request-Id`; входящий заголовок пробрасывается, иначе генерируется. `request_id` пишется в логи HTTP-запросов и инжеста — используйте его для сквозной корреляции.
 - **Контейнерный healthcheck**: образ собирается на distroless (без шелла), поэтому `HEALTHCHECK` вызывает подкоманду `/firewall healthcheck`, которая опрашивает `/readyz` того же процесса.
+- **Трейсинг**: при заданном `SUBSCRIPTION_FIREWALL_OTLP_ENDPOINT` HTTP-запросы и детекция оборачиваются в OpenTelemetry-спаны (экспорт OTLP/HTTP, W3C trace context). Локально удобно поднять Jaeger: `docker compose --profile tracing up -d jaeger` (UI на `:16686`).
 
 ## CI/CD
 
@@ -124,6 +133,7 @@ curl -H "X-API-Key: local-dev-key" http://localhost:8080/v1/users/user-1/subscri
 
 ## Ограничения
 
-- Эмитент карт заглушечный; для продакшена — реальный провайдер виртуальных карт.
+- Эмитент карт заглушечный; для продакшена — реальный провайдер виртуальных карт (обвязка с timeout/retry/circuit breaker уже стоит перед эмитентом).
 - Очередь детекции in-memory без БД теряет задачи при рестарте (dev-режим); с MySQL — outbox с гарантией at-least-once.
 - Пагинация выполняется в приложении; при больших объёмах — перенести в SQL.
+- Трейс-контекст не распространяется из HTTP-запроса в задачу outbox: спаны детекции не связаны со спаном инжеста (корреляция по `user_id` и request-id в логах).

@@ -14,8 +14,14 @@ services:
       # По умолчанию — MySQL из этого compose-файла. Для БД на хосте задайте в .env:
       # SUBSCRIPTION_FIREWALL_DB_DSN: "firewall:пароль@tcp(host.docker.internal:3306)/subscription_firewall?parseTime=true&loc=UTC"
       SUBSCRIPTION_FIREWALL_DB_DSN: "${SUBSCRIPTION_FIREWALL_DB_DSN:-firewall:${SUBSCRIPTION_FIREWALL_DB_PASSWORD:-firewall}@tcp(mysql:3306)/subscription_firewall?parseTime=true&loc=UTC}"
+      # Redis делает rate limit общим для всех реплик; уберите, если одна реплика.
+      SUBSCRIPTION_FIREWALL_REDIS_ADDR: "${SUBSCRIPTION_FIREWALL_REDIS_ADDR:-redis:6379}"
+      # Трейсинг включается при наличии OTLP-коллектора, например Jaeger:
+      # SUBSCRIPTION_FIREWALL_OTLP_ENDPOINT: "jaeger:4318"
     depends_on:
       mysql:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "/firewall", "healthcheck"]
@@ -43,5 +49,26 @@ services:
       retries: 30
     restart: unless-stopped
 
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Локальный коллектор трейсов: SUBSCRIPTION_FIREWALL_OTLP_ENDPOINT=jaeger:4318
+  jaeger:
+    image: jaegertracing/jaeger:2
+    profiles: ["tracing"]
+    ports:
+      - "16686:16686" # UI: http://localhost:16686
+
 volumes:
   mysql-data:
+  redis-data:

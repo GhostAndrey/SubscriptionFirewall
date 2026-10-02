@@ -57,6 +57,14 @@ type config struct {
 	logLevel                slog.Level
 	rateLimit               float64
 	rateBurst               int
+	redisAddr               string
+	redisPassword           string
+	otlpEndpoint            string
+	otlpInsecure            bool
+	issuerTimeout           time.Duration
+	issuerRetries           int
+	issuerBreakerThreshold  int
+	issuerBreakerCooldown   time.Duration
 }
 
 // storage values for SUBSCRIPTION_FIREWALL_STORAGE: auto picks mysql when a
@@ -87,6 +95,11 @@ func loadConfig() (config, error) {
 		logLevel:                slog.LevelInfo,
 		rateLimit:               100,
 		rateBurst:               200,
+		otlpInsecure:            true,
+		issuerTimeout:           5 * time.Second,
+		issuerRetries:           2,
+		issuerBreakerThreshold:  5,
+		issuerBreakerCooldown:   30 * time.Second,
 	}
 
 	var err error
@@ -141,6 +154,22 @@ func loadConfig() (config, error) {
 		cfg.storage = storageMemory
 	}
 	if cfg.logLevel, err = envLogLevel("SUBSCRIPTION_FIREWALL_LOG_LEVEL", cfg.logLevel); err != nil {
+		return cfg, err
+	}
+	cfg.redisAddr = os.Getenv("SUBSCRIPTION_FIREWALL_REDIS_ADDR")
+	cfg.redisPassword = os.Getenv("SUBSCRIPTION_FIREWALL_REDIS_PASSWORD")
+	cfg.otlpEndpoint = os.Getenv("SUBSCRIPTION_FIREWALL_OTLP_ENDPOINT")
+	cfg.otlpInsecure = envBool("SUBSCRIPTION_FIREWALL_OTLP_INSECURE", cfg.otlpInsecure)
+	if cfg.issuerTimeout, err = envNonNegativeDuration("SUBSCRIPTION_FIREWALL_ISSUER_TIMEOUT", cfg.issuerTimeout); err != nil {
+		return cfg, err
+	}
+	if cfg.issuerRetries, err = envNonNegativeInt("SUBSCRIPTION_FIREWALL_ISSUER_RETRIES", cfg.issuerRetries); err != nil {
+		return cfg, err
+	}
+	if cfg.issuerBreakerThreshold, err = envPositiveInt("SUBSCRIPTION_FIREWALL_ISSUER_BREAKER_THRESHOLD", cfg.issuerBreakerThreshold); err != nil {
+		return cfg, err
+	}
+	if cfg.issuerBreakerCooldown, err = envPositiveDuration("SUBSCRIPTION_FIREWALL_ISSUER_BREAKER_COOLDOWN", cfg.issuerBreakerCooldown); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
@@ -198,6 +227,21 @@ func run() error {
 	logger := slog.New(obs.NewSanitizingHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.logLevel})))
 	slog.SetDefault(logger)
 
+	tracingShutdown, err := obs.SetupTracing(applicationContext, cfg.otlpEndpoint, cfg.otlpInsecure)
+	if err != nil {
+		return fmt.Errorf("setup tracing: %w", err)
+	}
+	if tracingShutdown != nil {
+		defer func() {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
+			defer cancel()
+			if err := tracingShutdown(shutdownContext); err != nil {
+				logger.Error("tracer provider shutdown failed", "error", err)
+			}
+		}()
+		logger.Info("tracing enabled", "otlp_endpoint", cfg.otlpEndpoint)
+	}
+
 	metrics := obs.NewMetrics(prometheus.DefaultRegisterer)
 	clock := memory.Clock{}
 
@@ -235,7 +279,14 @@ func run() error {
 
 	detectorService := detector.New(transactionRepository, clock, detector.DefaultConfig())
 	subscriptionService := subscription.NewService(subscriptionRepository, clock)
-	tokenService := token.NewService(tokenRepository, issuer.NewSimulatedCardIssuer(cfg.issuerMonthlyLimitMinor), clock)
+	simulatedIssuer := issuer.NewSimulatedCardIssuer(cfg.issuerMonthlyLimitMinor)
+	resilientIssuer := issuer.NewResilientIssuer(simulatedIssuer, issuer.ResilientConfig{
+		Timeout:          cfg.issuerTimeout,
+		Retries:          cfg.issuerRetries,
+		BreakerThreshold: cfg.issuerBreakerThreshold,
+		BreakerCooldown:  cfg.issuerBreakerCooldown,
+	})
+	tokenService := token.NewService(tokenRepository, resilientIssuer, clock)
 	pipelineService := pipeline.New(detectionOutbox, detectorService, subscriptionService, tokenService, metrics, logger)
 	pipelineService.Start(applicationContext, cfg.workerCount)
 	defer pipelineService.Stop()
@@ -252,6 +303,9 @@ func run() error {
 			RateLimit:       cfg.rateLimit,
 			RateBurst:       cfg.rateBurst,
 			Readiness:       readiness,
+			Tracing:         cfg.otlpEndpoint != "",
+			RedisAddr:       cfg.redisAddr,
+			RedisPassword:   cfg.redisPassword,
 		},
 		transactionRepository,
 		subscriptionService,
@@ -454,6 +508,18 @@ func envLogLevel(name string, fallback slog.Level) (slog.Level, error) {
 		return 0, fmt.Errorf("%s must be one of debug|info|warn|error, got %q", name, configured)
 	}
 	return level, nil
+}
+
+func envNonNegativeDuration(name string, fallback time.Duration) (time.Duration, error) {
+	configured := os.Getenv(name)
+	if configured == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(configured)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative duration, got %q", name, configured)
+	}
+	return parsed, nil
 }
 
 func envNonNegativeFloat(name string, fallback float64) (float64, error) {

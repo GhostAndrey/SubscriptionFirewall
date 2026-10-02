@@ -4,9 +4,12 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"subscriptionfirewall/internal/obs"
 	"subscriptionfirewall/internal/ports"
@@ -24,6 +27,7 @@ type Server struct {
 	metrics       *obs.Metrics
 	logger        *slog.Logger
 	readiness     func(ctx context.Context) error
+	redis         *redis.Client
 	http          *http.Server
 }
 
@@ -37,6 +41,13 @@ type Config struct {
 	RateBurst       int
 	// Readiness reports whether the service can serve traffic; nil means always ready.
 	Readiness func(ctx context.Context) error
+	// Tracing wraps the mux with OpenTelemetry HTTP spans. OTLP export is
+	// configured at process start; without a collector spans are no-ops.
+	Tracing bool
+	// RedisAddr, when set, moves the per-IP rate limit into Redis so it is
+	// shared by all replicas; empty keeps the in-process limiter.
+	RedisAddr     string
+	RedisPassword string
 }
 
 func NewServer(
@@ -82,10 +93,36 @@ func NewServer(
 		logger.Warn("api authentication disabled: no api keys configured")
 	}
 
+	limiterMiddleware := func(next http.Handler) http.Handler { return next }
+	if limiter := newIPRateLimiter(config.RateLimit, config.RateBurst); limiter != nil {
+		limiterMiddleware = limiter.middleware
+	}
+	if config.RedisAddr != "" {
+		redisClient := redis.NewClient(&redis.Options{
+			Addr:     config.RedisAddr,
+			Password: config.RedisPassword,
+		})
+		if redisLimiter := newRedisRateLimiter(redisClient, int(config.RateLimit), logger); redisLimiter != nil {
+			limiterMiddleware = redisLimiter.middleware
+			server.redis = redisClient
+		} else {
+			_ = redisClient.Close()
+		}
+	}
+
+	var instrumented http.Handler = mux
+	if config.Tracing {
+		instrumented = otelhttp.NewHandler(mux, "http",
+			otelhttp.WithFilter(func(request *http.Request) bool {
+				return !publicPaths[strings.TrimSuffix(request.URL.Path, "/")]
+			}),
+		)
+	}
+
 	handler := server.requestIDMiddleware(loggingMiddleware(logger, recoveryMiddleware(logger,
 		metricsMiddleware(metrics,
-			newIPRateLimiter(config.RateLimit, config.RateBurst).middleware(
-				authenticator.middleware(logger, mux))))))
+			limiterMiddleware(
+				authenticator.middleware(logger, instrumented))))))
 	server.http = &http.Server{
 		Addr:         config.Address,
 		Handler:      handler,
@@ -104,6 +141,9 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.redis != nil {
+		_ = s.redis.Close()
+	}
 	return s.http.Shutdown(ctx)
 }
 

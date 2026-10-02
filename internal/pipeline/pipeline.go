@@ -3,11 +3,15 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"subscriptionfirewall/internal/detector"
 	"subscriptionfirewall/internal/domain"
@@ -23,6 +27,8 @@ const (
 	maintenanceInterval = time.Minute
 	staleItemAfter      = 5 * time.Minute
 )
+
+var tracer = otel.Tracer("subscriptionfirewall/pipeline")
 
 type Pipeline struct {
 	outbox        ports.DetectionOutbox
@@ -112,7 +118,13 @@ func (p *Pipeline) workerLoop(ctx context.Context) {
 func (p *Pipeline) processItem(ctx context.Context, item ports.OutboxItem) {
 	p.metrics.CountDetectionRun()
 
-	if err := p.runDetection(ctx, item.UserID); err != nil {
+	spanContext, span := tracer.Start(ctx, "pipeline.detect",
+		trace.WithAttributes(attribute.String("user_id", string(item.UserID))))
+	defer span.End()
+
+	if err := p.runDetection(spanContext, item.UserID); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "detection failed")
 		p.logger.Error("detection failed, job will be retried",
 			"user_id", string(item.UserID),
 			"attempt", item.Attempts,
@@ -130,7 +142,6 @@ func (p *Pipeline) processItem(ctx context.Context, item ports.OutboxItem) {
 
 func (p *Pipeline) runDetection(ctx context.Context, userID domain.UserID) error {
 	detections, err := p.detector.Detect(ctx, userID)
-	fmt.Println("DEBUG detect:", userID, "->", len(detections), "detections, err =", err)
 	if err != nil {
 		return err
 	}

@@ -18,3 +18,7 @@
 - Env-конфигурация: уровня логов (`SUBSCRIPTION_FIREWALL_LOG_LEVEL`), пула БД (`SUBSCRIPTION_FIREWALL_DB_MAX_OPEN_CONNS`, `_MAX_IDLE_CONNS`, `_CONN_MAX_LIFETIME`), таймаутов HTTP (`SUBSCRIPTION_FIREWALL_READ_TIMEOUT`, `_WRITE_TIMEOUT`, `_SHUTDOWN_TIMEOUT`).
 - `SUBSCRIPTION_FIREWALL_STORAGE=auto|memory|mysql` — явный выбор хранилища (по умолчанию auto: mysql при заданном DSN, иначе memory).
 - `.env.example`, `LICENSE`, этот CHANGELOG; цели `test-race` и `cover` в Makefile.
+- OpenTelemetry-трейсинг: HTTP-спаны и спаны детекции, экспорт OTLP/HTTP (`SUBSCRIPTION_FIREWALL_OTLP_ENDPOINT`); Jaeger в compose под профилем `tracing`.
+- Redis rate limit: при заданном `SUBSCRIPTION_FIREWALL_REDIS_ADDR` лимит по IP общий для всех реплик; Redis в compose.
+- Схема БД переведена на версионированные goose-миграции (`internal/adapter/mysql/migrations/*.sql`) вместо `CREATE TABLE IF NOT EXISTS` в коде.
+- Обвязка эмитента карт: timeout, retry с backoff и circuit breaker (`SUBSCRIPTION_FIREWALL_ISSUER_*`).
