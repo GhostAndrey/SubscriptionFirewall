@@ -22,3 +22,7 @@
 - Redis rate limit: при заданном `SUBSCRIPTION_FIREWALL_REDIS_ADDR` лимит по IP общий для всех реплик; Redis в compose.
 - Схема БД переведена на версионированные goose-миграции (`internal/adapter/mysql/migrations/*.sql`) вместо `CREATE TABLE IF NOT EXISTS` в коде.
 - Обвязка эмитента карт: timeout, retry с backoff и circuit breaker (`SUBSCRIPTION_FIREWALL_ISSUER_*`).
+
+### Changed
+
+- Лицензия изменена с MIT на Apache-2.0 (текст в `LICENSE`, упоминания в README и `api/openapi.yaml`).

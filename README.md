@@ -38,7 +38,7 @@ make run
 SUBSCRIPTION_FIREWALL_API_KEYS=local-dev-key make docker-run
 ```
 
-Спецификация API: [api/openapi.yaml](api/openapi.yaml). Лицензия — [MIT](LICENSE).
+Спецификация API: [api/openapi.yaml](api/openapi.yaml). Лицензия — [Apache-2.0](LICENSE).
 
 Без настроенных ключей API сервис не стартует — нужно либо задать `SUBSCRIPTION_FIREWALL_API_KEYS`, либо явно разрешить анонимный доступ (`SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH=true`).
 

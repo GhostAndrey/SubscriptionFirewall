@@ -15,7 +15,8 @@ info:
     передавайте его при обращениях в поддержку.
   version: 1.0.0
   license:
-    name: MIT
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
 
 servers:
   - url: http://localhost:8080
