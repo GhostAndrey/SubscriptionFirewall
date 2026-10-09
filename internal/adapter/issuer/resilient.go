@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"subscriptionfirewall/internal/domain"
 	"subscriptionfirewall/internal/ports"
 )
 
@@ -58,7 +57,7 @@ func NewResilientIssuer(inner ports.VirtualCardIssuer, config ResilientConfig) *
 	}
 }
 
-func (r *ResilientIssuer) Issue(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (ports.IssuedCard, error) {
+func (r *ResilientIssuer) Issue(ctx context.Context, request ports.IssueRequest) (ports.IssuedCard, error) {
 	if err := r.breaker.acquire(r.nowFunc()); err != nil {
 		return ports.IssuedCard{}, err
 	}
@@ -71,7 +70,7 @@ func (r *ResilientIssuer) Issue(ctx context.Context, userID domain.UserID, merch
 			}
 		}
 
-		card, err := r.issueOnce(ctx, userID, merchantID)
+		card, err := r.issueOnce(ctx, request)
 		if err == nil {
 			r.breaker.success()
 			return card, nil
@@ -82,13 +81,13 @@ func (r *ResilientIssuer) Issue(ctx context.Context, userID domain.UserID, merch
 	return ports.IssuedCard{}, lastErr
 }
 
-func (r *ResilientIssuer) issueOnce(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (ports.IssuedCard, error) {
+func (r *ResilientIssuer) issueOnce(ctx context.Context, request ports.IssueRequest) (ports.IssuedCard, error) {
 	if r.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.timeout)
 		defer cancel()
 	}
-	return r.inner.Issue(ctx, userID, merchantID)
+	return r.inner.Issue(ctx, request)
 }
 
 func sleepBackoff(ctx context.Context, delay time.Duration) bool {

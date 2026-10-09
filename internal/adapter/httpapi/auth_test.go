@@ -7,14 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/prometheus/client_golang/prometheus"
-
-	"subscriptionfirewall/internal/adapter/issuer"
-	"subscriptionfirewall/internal/adapter/memory"
-	"subscriptionfirewall/internal/obs"
-	"subscriptionfirewall/internal/subscription"
-	"subscriptionfirewall/internal/token"
 )
 
 func testLogger() *slog.Logger {
@@ -103,22 +95,10 @@ func TestAPIKeyMiddleware(t *testing.T) {
 func TestServerRoutesRequireAPIKey(t *testing.T) {
 	const apiKey = "integration-secret"
 
-	metrics := obs.NewMetrics(prometheus.NewRegistry())
-	transactionRepository := memory.NewTransactionRepository()
-	apiServer := NewServer(
-		Config{APIKeys: []string{apiKey}},
-		transactionRepository,
-		subscription.NewService(memory.NewSubscriptionRepository(), memory.Clock{}),
-		token.NewService(
-			memory.NewVirtualTokenRepository(),
-			issuer.NewSimulatedCardIssuer(100_000),
-			memory.Clock{},
-		),
-		memory.NewDetectionOutbox(transactionRepository, metrics, testLogger(), 16),
-		memory.NewAuditLog(),
-		metrics,
-		testLogger(),
-	)
+	apiServer, err := newServerFixture().buildServer(t, Config{APIKeys: []string{apiKey}})
+	if err != nil {
+		t.Fatalf("build server: %v", err)
+	}
 	testServer := httptest.NewServer(apiServer.http.Handler)
 	defer testServer.Close()
 

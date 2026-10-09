@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -94,60 +95,97 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// statusRecorder captures the response status for logging and metrics. It
+// forwards to the wrapped writer through Unwrap so handlers keep full access
+// to flushing, hijacking and the original ResponseWriter API.
 type statusRecorder struct {
-	inner  http.ResponseWriter
-	status int
+	http.ResponseWriter
+	status  int
+	written bool
 }
 
-func (r *statusRecorder) Header() http.Header { return r.inner.Header() }
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 func (r *statusRecorder) WriteHeader(status int) {
-	r.status = status
-	r.inner.WriteHeader(status)
+	if !r.written {
+		r.status = status
+		r.written = true
+	}
+	r.ResponseWriter.WriteHeader(status)
 }
 
 func (r *statusRecorder) Write(payload []byte) (int, error) {
-	if r.status == 0 {
+	if !r.written {
 		r.status = http.StatusOK
+		r.written = true
 	}
-	return r.inner.Write(payload)
+	return r.ResponseWriter.Write(payload)
 }
 
-func metricsMiddleware(metrics *obs.Metrics, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		started := time.Now()
-		recorder := &statusRecorder{inner: w}
-
-		next.ServeHTTP(recorder, r)
-
-		route := r.Pattern
-		if route == "" {
-			route = "unmatched"
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		if !r.written {
+			r.status = http.StatusOK
+			r.written = true
 		}
-		metrics.ObserveHTTPRequest(r.Method, route, recorder.status, time.Since(started))
-	})
+		flusher.Flush()
+	}
 }
 
-func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+// Hijack forwards to the wrapped writer when it supports hijacking, which
+// keeps websockets and similar upgrades working through the middleware chain.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("hijacking is not supported by %T", r.ResponseWriter)
+	}
+	return hijacker.Hijack()
+}
+
+func (r *statusRecorder) Status() int {
+	if !r.written {
+		return http.StatusOK
+	}
+	return r.status
+}
+
+// observationMiddleware records one entry per request: the status code and the
+// latency feed both the access log and the Prometheus metrics, so the chain
+// wraps the handler exactly once.
+func observationMiddleware(logger *slog.Logger, metrics *obs.Metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		recorder := &statusRecorder{inner: w}
+		recorder := &statusRecorder{ResponseWriter: w}
+
+		// The deferred observer reads the request context captured by the
+		// closure, which is the context the handler runs under. contextcheck
+		// cannot see that indirection.
+		defer func() { //nolint:contextcheck // see above
+			route := r.Pattern
+			if route == "" {
+				route = "unmatched"
+			}
+			duration := time.Since(started)
+			metrics.ObserveHTTPRequest(r.Method, route, recorder.Status(), duration)
+			logger.Info("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", recorder.Status(),
+				"duration_ms", duration.Milliseconds(),
+				"request_id", requestIDFromContext(r.Context()),
+			)
+		}()
 
 		next.ServeHTTP(recorder, r)
-
-		logger.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", recorder.status,
-			"duration_ms", time.Since(started).Milliseconds(),
-			"request_id", requestIDFromContext(r.Context()),
-		)
 	})
 }
 
 func recoveryMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
+		// The deferred guard reads the request context captured by the closure, which
+		// is the context the handler runs under. contextcheck cannot see that
+		// indirection.
+		defer func() { //nolint:contextcheck // see above
 			recovered := recover()
 			if recovered == nil {
 				return

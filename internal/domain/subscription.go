@@ -60,6 +60,10 @@ type Subscription struct {
 	LastChargedAt    time.Time
 	NextExpectedAt   time.Time
 	ObservedPayments int
+	// Version increments on every persisted change and drives optimistic
+	// concurrency control: a write is accepted only when the stored version
+	// still matches the one the caller read.
+	Version uint32
 }
 
 func NewSubscription(

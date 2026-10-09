@@ -43,14 +43,14 @@ func TestStopDrainsQueuedUsers(t *testing.T) {
 		outbox,
 		detector.New(transactions, memory.Clock{}, detector.DefaultConfig()),
 		subscription.NewService(subscriptions, memory.Clock{}),
-		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}),
+		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
 	)
 	pipelineService.Start(context.Background(), 2)
 	pipelineService.Stop()
 
-	listed, err := subscriptions.ListByUser(context.Background(), userID)
+	listed, err := subscriptions.ListByUserPage(context.Background(), userID, ports.Page{})
 	if err != nil {
 		t.Fatalf("list subscriptions: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestStopIsIdempotentAndOutboxRejectsAfterStop(t *testing.T) {
 		outbox,
 		detector.New(transactions, memory.Clock{}, detector.DefaultConfig()),
 		subscription.NewService(memory.NewSubscriptionRepository(), memory.Clock{}),
-		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}),
+		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
 	)

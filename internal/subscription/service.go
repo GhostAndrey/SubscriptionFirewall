@@ -2,21 +2,24 @@ package subscription
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"subscriptionfirewall/internal/domain"
+	"subscriptionfirewall/internal/identifier"
 	"subscriptionfirewall/internal/ports"
+)
+
+const (
+	subscriptionIDPrefix = "sub"
+	updateAttempts       = 3
+	sweepBatchSize       = 500
 )
 
 type Service struct {
 	subscriptions ports.SubscriptionRepository
 	clock         ports.Clock
-	mu            sync.Mutex
 }
 
 func NewService(subscriptions ports.SubscriptionRepository, clock ports.Clock) *Service {
@@ -31,8 +34,8 @@ func (s *Service) Get(ctx context.Context, id domain.SubscriptionID) (*domain.Su
 	return subscription, nil
 }
 
-func (s *Service) ListByUser(ctx context.Context, userID domain.UserID) ([]*domain.Subscription, error) {
-	subscriptions, err := s.subscriptions.ListByUser(ctx, userID)
+func (s *Service) ListByUser(ctx context.Context, userID domain.UserID, page ports.Page) ([]*domain.Subscription, error) {
+	subscriptions, err := s.subscriptions.ListByUserPage(ctx, userID, page)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions for user %s: %w", userID, err)
 	}
@@ -47,32 +50,46 @@ func (s *Service) GetByUserAndMerchant(ctx context.Context, userID domain.UserID
 	return subscription, nil
 }
 
-func (s *Service) Sweep(ctx context.Context) ([]*domain.Subscription, error) {
-	subscriptions, err := s.subscriptions.ListAll(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list subscriptions for sweep: %w", err)
+// Sweep marks overdue subscriptions as zombies. It reads pending rows in
+// bounded batches and keeps going until none are left, so the work scales with
+// the backlog rather than with the total subscription count.
+func (s *Service) Sweep(ctx context.Context, batchSize int) ([]*domain.Subscription, error) {
+	if batchSize <= 0 {
+		batchSize = sweepBatchSize
 	}
-
 	now := s.clock.Now()
-	changed := make([]*domain.Subscription, 0)
-	for _, subscription := range subscriptions {
-		before := subscription.State
-		if err := subscription.MarkMissed(now); err != nil {
-			return nil, fmt.Errorf("mark subscription %s missed: %w", subscription.ID, err)
+	changed := make([]*domain.Subscription, 0, batchSize)
+
+	for {
+		pending, err := s.subscriptions.ListPendingZombieTransition(ctx, now, batchSize)
+		if err != nil {
+			return nil, fmt.Errorf("list subscriptions pending zombie transition: %w", err)
 		}
-		if subscription.State == before {
-			continue
+		if len(pending) == 0 {
+			return changed, nil
 		}
-		if err := s.subscriptions.Save(ctx, subscription); err != nil {
-			return nil, fmt.Errorf("persist subscription %s: %w", subscription.ID, err)
+
+		for _, subscription := range pending {
+			before := subscription.State
+			if err := s.markMissed(ctx, subscription, now); err != nil {
+				if errors.Is(err, ports.ErrVersionConflict) {
+					continue
+				}
+				return nil, err
+			}
+			if subscription.State != before {
+				changed = append(changed, subscription)
+			}
 		}
-		changed = append(changed, subscription)
+
+		if err := ctx.Err(); err != nil {
+			return changed, err
+		}
 	}
-	return changed, nil
 }
 
 func (s *Service) Freeze(ctx context.Context, id domain.SubscriptionID) (*domain.Subscription, error) {
-	subscription, err := s.mutate(ctx, id, (*domain.Subscription).Freeze)
+	subscription, err := s.update(ctx, id, (*domain.Subscription).Freeze)
 	if err != nil {
 		return nil, fmt.Errorf("freeze subscription %s: %w", id, err)
 	}
@@ -80,7 +97,7 @@ func (s *Service) Freeze(ctx context.Context, id domain.SubscriptionID) (*domain
 }
 
 func (s *Service) Reactivate(ctx context.Context, id domain.SubscriptionID) (*domain.Subscription, error) {
-	subscription, err := s.mutate(ctx, id, (*domain.Subscription).Reactivate)
+	subscription, err := s.update(ctx, id, (*domain.Subscription).Reactivate)
 	if err != nil {
 		return nil, fmt.Errorf("reactivate subscription %s: %w", id, err)
 	}
@@ -88,43 +105,71 @@ func (s *Service) Reactivate(ctx context.Context, id domain.SubscriptionID) (*do
 }
 
 func (s *Service) Terminate(ctx context.Context, id domain.SubscriptionID) (*domain.Subscription, error) {
-	subscription, err := s.mutate(ctx, id, (*domain.Subscription).Terminate)
+	subscription, err := s.update(ctx, id, (*domain.Subscription).Terminate)
 	if err != nil {
 		return nil, fmt.Errorf("terminate subscription %s: %w", id, err)
 	}
 	return subscription, nil
 }
 
-func (s *Service) mutate(ctx context.Context, id domain.SubscriptionID, mutation func(*domain.Subscription) error) (*domain.Subscription, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	subscription, err := s.subscriptions.GetByID(ctx, id)
-	if err != nil {
-		return nil, fmt.Errorf("load subscription %s: %w", id, err)
+// update loads a subscription, applies the mutation and persists it with an
+// optimistic version check, retrying while another replica keeps winning the
+// race.
+func (s *Service) update(ctx context.Context, id domain.SubscriptionID, mutation func(*domain.Subscription) error) (*domain.Subscription, error) {
+	var lastErr error
+	for range updateAttempts {
+		subscription, err := s.subscriptions.GetByID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("load subscription %s: %w", id, err)
+		}
+		if err := mutation(subscription); err != nil {
+			return nil, err
+		}
+		if err := s.subscriptions.UpdateVersion(ctx, subscription); err != nil {
+			if errors.Is(err, ports.ErrVersionConflict) {
+				lastErr = err
+				continue
+			}
+			return nil, fmt.Errorf("persist subscription %s: %w", id, err)
+		}
+		return subscription, nil
 	}
-	if err := mutation(subscription); err != nil {
-		return nil, err
-	}
-	if err := s.subscriptions.Save(ctx, subscription); err != nil {
-		return nil, fmt.Errorf("persist subscription %s: %w", id, err)
-	}
-	return subscription, nil
+	return nil, fmt.Errorf("persist subscription %s after %d attempts: %w", id, updateAttempts, lastErr)
 }
 
 func (s *Service) ApplyDetection(ctx context.Context, detected domain.DetectedSubscription, virtualTokenID string) (*domain.Subscription, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, err := s.subscriptions.FindByUserAndMerchant(ctx, detected.UserID, detected.MerchantID)
-	switch {
-	case err == nil:
-		return s.mergeDetected(ctx, existing, detected, virtualTokenID)
-	case errors.Is(err, domain.ErrNotFound):
-		return s.createDetected(ctx, detected, virtualTokenID)
-	default:
-		return nil, fmt.Errorf("find subscription for merchant %s: %w", detected.MerchantID, err)
+	created, err := s.newDetectedSubscription(detected, virtualTokenID)
+	if err != nil {
+		return nil, err
 	}
+
+	stored, err := s.subscriptions.CreateIfAbsent(ctx, created)
+	if err != nil {
+		return nil, fmt.Errorf("persist detected subscription for merchant %s: %w", detected.MerchantID, err)
+	}
+	if stored.ID == created.ID {
+		return stored, nil
+	}
+	return s.mergeWithRetry(ctx, detected, virtualTokenID)
+}
+
+// mergeWithRetry folds a detection into an existing subscription, retrying
+// while another replica keeps changing the same row.
+func (s *Service) mergeWithRetry(ctx context.Context, detected domain.DetectedSubscription, virtualTokenID string) (*domain.Subscription, error) {
+	var lastErr error
+	for range updateAttempts {
+		existing, err := s.subscriptions.FindByUserAndMerchant(ctx, detected.UserID, detected.MerchantID)
+		if err != nil {
+			return nil, fmt.Errorf("find subscription for merchant %s: %w", detected.MerchantID, err)
+		}
+		subscription, mergeErr := s.mergeDetected(ctx, existing, detected, virtualTokenID)
+		if errors.Is(mergeErr, ports.ErrVersionConflict) {
+			lastErr = mergeErr
+			continue
+		}
+		return subscription, mergeErr
+	}
+	return nil, fmt.Errorf("apply detection for merchant %s after %d attempts: %w", detected.MerchantID, updateAttempts, lastErr)
 }
 
 func (s *Service) mergeDetected(ctx context.Context, existing *domain.Subscription, detected domain.DetectedSubscription, virtualTokenID string) (*domain.Subscription, error) {
@@ -132,23 +177,21 @@ func (s *Service) mergeDetected(ctx context.Context, existing *domain.Subscripti
 		if err := existing.MarkMissed(s.clock.Now()); err != nil {
 			return nil, fmt.Errorf("mark subscription %s missed: %w", existing.ID, err)
 		}
-	} else {
-		if err := existing.ObserveActivity(detected.LastChargedAt, detected.AverageAmount, detected.ObservedPayments); err != nil {
-			return nil, fmt.Errorf("observe activity on subscription %s: %w", existing.ID, err)
-		}
+	} else if err := existing.ObserveActivity(detected.LastChargedAt, detected.AverageAmount, detected.ObservedPayments); err != nil {
+		return nil, fmt.Errorf("observe activity on subscription %s: %w", existing.ID, err)
 	}
 	if virtualTokenID != "" {
 		existing.VirtualTokenID = virtualTokenID
 	}
-	if err := s.subscriptions.Save(ctx, existing); err != nil {
-		return nil, fmt.Errorf("persist subscription %s: %w", existing.ID, err)
+	if err := s.subscriptions.UpdateVersion(ctx, existing); err != nil {
+		return nil, err
 	}
 	return existing, nil
 }
 
-func (s *Service) createDetected(ctx context.Context, detected domain.DetectedSubscription, virtualTokenID string) (*domain.Subscription, error) {
+func (s *Service) newDetectedSubscription(detected domain.DetectedSubscription, virtualTokenID string) (*domain.Subscription, error) {
 	created, err := domain.NewSubscription(
-		domain.SubscriptionID(newIdentifier("sub")),
+		domain.SubscriptionID(identifier.New(subscriptionIDPrefix)),
 		detected.UserID,
 		detected.MerchantID,
 		detected.MerchantName,
@@ -163,16 +206,32 @@ func (s *Service) createDetected(ctx context.Context, detected domain.DetectedSu
 		return nil, err
 	}
 	created.VirtualTokenID = virtualTokenID
-	if err := s.subscriptions.Save(ctx, created); err != nil {
-		return nil, fmt.Errorf("persist subscription %s: %w", created.ID, err)
-	}
 	return created, nil
 }
 
-func newIdentifier(prefix string) string {
-	random := make([]byte, 8)
-	if _, err := rand.Read(random); err != nil {
-		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+// markMissed re-reads the subscription and applies the overdue transition under
+// an optimistic version check, skipping the row when another replica wins.
+func (s *Service) markMissed(ctx context.Context, subscription *domain.Subscription, now time.Time) error {
+	for range updateAttempts {
+		current, err := s.subscriptions.GetByID(ctx, subscription.ID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				return nil
+			}
+			return fmt.Errorf("load subscription %s: %w", subscription.ID, err)
+		}
+		if err := current.MarkMissed(now); err != nil {
+			return fmt.Errorf("mark subscription %s missed: %w", current.ID, err)
+		}
+		if err := s.subscriptions.UpdateVersion(ctx, current); err != nil {
+			if errors.Is(err, ports.ErrVersionConflict) {
+				continue
+			}
+			return fmt.Errorf("persist subscription %s: %w", current.ID, err)
+		}
+		subscription.State = current.State
+		subscription.Version = current.Version
+		return nil
 	}
-	return prefix + "-" + hex.EncodeToString(random)
+	return fmt.Errorf("mark subscription %s missed after %d attempts: %w", subscription.ID, updateAttempts, ports.ErrVersionConflict)
 }

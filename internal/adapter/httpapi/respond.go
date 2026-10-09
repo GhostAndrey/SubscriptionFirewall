@@ -33,7 +33,7 @@ func writeError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusPaymentRequired, ErrorResponse{Error: err.Error()})
 	case errors.Is(err, domain.ErrTokenNotActive):
 		writeJSON(w, http.StatusForbidden, ErrorResponse{Error: err.Error()})
-	case errors.Is(err, domain.ErrUnknownCurrency):
+	case errors.Is(err, domain.ErrInvalidArgument), errors.Is(err, domain.ErrInvalidAmount), errors.Is(err, domain.ErrUnknownCurrency):
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 	default:
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "internal error"})
@@ -50,6 +50,9 @@ func decodeJSON[T any](r *http.Request) (T, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&target); err != nil {
 		return target, fmt.Errorf("decode request body: %w", err)
+	}
+	if decoder.More() {
+		return target, errors.New("decode request body: unexpected content after the JSON value")
 	}
 	return target, nil
 }

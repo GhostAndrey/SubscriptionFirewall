@@ -6,32 +6,42 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-const redisKeyPrefix = "subscription_firewall:ratelimit:"
+const (
+	redisKeyPrefix = "subscription_firewall:ratelimit:"
+	redisWindow    = time.Second
+)
 
 // redisRateLimiter is a fixed-window counter shared by all replicas: with the
 // same Redis, N instances still allow the configured requests per second in
-// total, not per instance. Redis errors fail open: availability beats a
-// strictly enforced limit.
+// total, not per instance. When Redis is unreachable the limiter fails open
+// for reads, but money-moving endpoints are refused instead: availability is
+// not worth letting an outage turn into an unmetered spending window.
 type redisRateLimiter struct {
 	client *redis.Client
 	limit  int
+	burst  int
 	window time.Duration
 	logger *slog.Logger
 }
 
-func newRedisRateLimiter(client *redis.Client, limit int, logger *slog.Logger) *redisRateLimiter {
+func newRedisRateLimiter(client *redis.Client, limit, burst int, logger *slog.Logger) *redisRateLimiter {
 	if client == nil || limit <= 0 {
 		return nil
+	}
+	if burst < limit {
+		burst = limit
 	}
 	return &redisRateLimiter{
 		client: client,
 		limit:  limit,
-		window: time.Second,
+		burst:  burst,
+		window: redisWindow,
 		logger: logger,
 	}
 }
@@ -45,7 +55,11 @@ func (l *redisRateLimiter) middleware(next http.Handler) http.Handler {
 
 		allowed, retryAfter, err := l.allow(r.Context(), clientIP(r))
 		if err != nil {
-			l.logger.Error("redis rate limit check failed, allowing request", "error", err)
+			l.logger.Error("redis rate limit check failed", "path", r.URL.Path, "error", err)
+			if requiresHardLimit(r) {
+				writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "rate limiter unavailable"})
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -56,6 +70,16 @@ func (l *redisRateLimiter) middleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// requiresHardLimit marks endpoints that move money or provision cards. Their
+// volume is low and bounded, so refusing them while the shared counter is
+// unavailable is cheaper than letting them through unmetered.
+func requiresHardLimit(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return strings.HasSuffix(r.URL.Path, "/authorize")
 }
 
 func (l *redisRateLimiter) allow(ctx context.Context, client string) (allowed bool, retryAfterSeconds int, err error) {
@@ -69,7 +93,7 @@ func (l *redisRateLimiter) allow(ctx context.Context, client string) (allowed bo
 		return false, 0, fmt.Errorf("rate limit counter: %w", err)
 	}
 
-	if incr.Val() > int64(l.limit) {
+	if incr.Val() > int64(l.burst) {
 		retry := windowSeconds - int(l.now()%int64(windowSeconds))
 		return false, retry, nil
 	}

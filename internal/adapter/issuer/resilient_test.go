@@ -10,6 +10,14 @@ import (
 	"subscriptionfirewall/internal/ports"
 )
 
+func testIssueRequest() ports.IssueRequest {
+	return ports.IssueRequest{
+		UserID:         domain.UserID("user-1"),
+		MerchantID:     domain.MerchantID("merch-1"),
+		IdempotencyKey: "issue:user-1:merch-1",
+	}
+}
+
 type fakeIssuer struct {
 	calls    int
 	failures int // number of initial calls that fail before succeeding
@@ -17,7 +25,7 @@ type fakeIssuer struct {
 	delay    time.Duration
 }
 
-func (f *fakeIssuer) Issue(ctx context.Context, _ domain.UserID, _ domain.MerchantID) (ports.IssuedCard, error) {
+func (f *fakeIssuer) Issue(ctx context.Context, _ ports.IssueRequest) (ports.IssuedCard, error) {
 	f.calls++
 	if f.delay > 0 {
 		select {
@@ -29,14 +37,14 @@ func (f *fakeIssuer) Issue(ctx context.Context, _ domain.UserID, _ domain.Mercha
 	if f.calls <= f.failures {
 		return ports.IssuedCard{}, f.err
 	}
-	return ports.IssuedCard{}, nil
+	return ports.IssuedCard{MaskedPAN: "411111******1234", MonthlyLimit: 10_000, Currency: "USD"}, nil
 }
 
 func TestResilientIssuerRetriesUntilSuccess(t *testing.T) {
 	inner := &fakeIssuer{failures: 2, err: errors.New("provider down")}
 	issuer := NewResilientIssuer(inner, ResilientConfig{Retries: 3, Backoff: time.Millisecond})
 
-	if _, err := issuer.Issue(context.Background(), "user-1", "merch-1"); err != nil {
+	if _, err := issuer.Issue(context.Background(), testIssueRequest()); err != nil {
 		t.Fatalf("Issue failed: %v", err)
 	}
 	if inner.calls != 3 {
@@ -49,7 +57,7 @@ func TestResilientIssuerReturnsLastErrorAfterExhaustedRetries(t *testing.T) {
 	inner := &fakeIssuer{failures: 99, err: boom}
 	issuer := NewResilientIssuer(inner, ResilientConfig{Retries: 2, Backoff: time.Millisecond})
 
-	if _, err := issuer.Issue(context.Background(), "user-1", "merch-1"); !errors.Is(err, boom) {
+	if _, err := issuer.Issue(context.Background(), testIssueRequest()); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want %v", err, boom)
 	}
 	if inner.calls != 3 {
@@ -61,7 +69,7 @@ func TestResilientIssuerTimeoutPerAttempt(t *testing.T) {
 	inner := &fakeIssuer{delay: 50 * time.Millisecond}
 	issuer := NewResilientIssuer(inner, ResilientConfig{Timeout: 5 * time.Millisecond})
 
-	if _, err := issuer.Issue(context.Background(), "user-1", "merch-1"); err == nil {
+	if _, err := issuer.Issue(context.Background(), testIssueRequest()); err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
 }
@@ -74,14 +82,14 @@ func TestResilientIssuerBreakerOpensAndRecovers(t *testing.T) {
 
 	// Two failed calls (threshold 2) open the breaker.
 	for range 2 {
-		if _, err := issuer.Issue(ctx, "user-1", "merch-1"); !errors.Is(err, boom) {
+		if _, err := issuer.Issue(ctx, testIssueRequest()); !errors.Is(err, boom) {
 			t.Fatalf("err = %v, want %v", err, boom)
 		}
 	}
 
 	// While open: fail fast without reaching the provider.
 	callsAfterOpen := inner.calls
-	if _, err := issuer.Issue(ctx, "user-1", "merch-1"); !errors.Is(err, errBreakerOpen) {
+	if _, err := issuer.Issue(ctx, testIssueRequest()); !errors.Is(err, errBreakerOpen) {
 		t.Fatalf("err = %v, want %v", err, errBreakerOpen)
 	}
 	if inner.calls != callsAfterOpen {
@@ -91,10 +99,10 @@ func TestResilientIssuerBreakerOpensAndRecovers(t *testing.T) {
 	// Cooldown elapsed: single probe succeeds, breaker closes.
 	inner.err = nil
 	time.Sleep(25 * time.Millisecond)
-	if _, err := issuer.Issue(ctx, "user-1", "merch-1"); err != nil {
+	if _, err := issuer.Issue(ctx, testIssueRequest()); err != nil {
 		t.Fatalf("probe Issue failed: %v", err)
 	}
-	if _, err := issuer.Issue(ctx, "user-1", "merch-1"); err != nil {
+	if _, err := issuer.Issue(ctx, testIssueRequest()); err != nil {
 		t.Fatalf("Issue after recovery failed: %v", err)
 	}
 }

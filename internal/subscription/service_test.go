@@ -3,11 +3,13 @@ package subscription
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"subscriptionfirewall/internal/adapter/memory"
 	"subscriptionfirewall/internal/domain"
+	"subscriptionfirewall/internal/ports"
 )
 
 type fixedClock struct{ now time.Time }
@@ -61,6 +63,107 @@ func TestTerminateIsFinal(t *testing.T) {
 	if _, err := service.Freeze(context.Background(), "sub-1"); !errors.Is(err, domain.ErrInvalidTransition) {
 		t.Fatalf("expected ErrInvalidTransition, got %v", err)
 	}
+}
+
+func TestUpdateRejectsStaleVersion(t *testing.T) {
+	repository := memory.NewSubscriptionRepository()
+	ctx := context.Background()
+
+	created := seedSubscription(t, repository, "sub-version", time.Now())
+
+	stale := cloneOf(t, repository, "sub-version")
+	latest := cloneOf(t, repository, "sub-version")
+	if err := latest.Freeze(); err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if err := repository.UpdateVersion(ctx, latest); err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+
+	if err := repository.UpdateVersion(ctx, stale); !errors.Is(err, ports.ErrVersionConflict) {
+		t.Fatalf("expected ErrVersionConflict for a stale write, got %v", err)
+	}
+	if stale.Version != created.Version {
+		t.Errorf("stale write must not bump the version: %d vs %d", stale.Version, created.Version)
+	}
+}
+
+func TestConcurrentMutationsSerializeThroughRetries(t *testing.T) {
+	repository := memory.NewSubscriptionRepository()
+	first := NewService(repository, memory.Clock{})
+	second := NewService(repository, memory.Clock{})
+	ctx := context.Background()
+	seedSubscription(t, repository, "sub-race", time.Now())
+
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	for slot, service := range []*Service{first, second} {
+		wg.Add(1)
+		go func(index int, s *Service) {
+			defer wg.Done()
+			_, results[index] = s.Freeze(ctx, "sub-race")
+		}(slot, service)
+	}
+	wg.Wait()
+
+	for slot, err := range results {
+		if err != nil {
+			t.Fatalf("mutation %d failed: %v", slot, err)
+		}
+	}
+
+	persisted, err := repository.GetByID(ctx, "sub-race")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if persisted.State != domain.SubscriptionFrozen {
+		t.Errorf("expected Frozen, got %s", persisted.State)
+	}
+}
+
+func TestTerminateWinsOverConcurrentUpdate(t *testing.T) {
+	repository := memory.NewSubscriptionRepository()
+	terminating := NewService(repository, memory.Clock{})
+	ctx := context.Background()
+	seedSubscription(t, repository, "sub-final", time.Now())
+
+	if _, err := terminating.Terminate(ctx, "sub-final"); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+	if _, err := terminating.Freeze(ctx, "sub-final"); !errors.Is(err, domain.ErrInvalidTransition) {
+		t.Fatalf("expected ErrInvalidTransition after termination, got %v", err)
+	}
+
+	persisted, err := repository.GetByID(ctx, "sub-final")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if persisted.State != domain.SubscriptionTerminated {
+		t.Errorf("expected the terminal state to survive, got %s", persisted.State)
+	}
+}
+
+func seedSubscription(t *testing.T, repository *memory.SubscriptionRepository, id domain.SubscriptionID, now time.Time) *domain.Subscription {
+	t.Helper()
+
+	subscription, err := domain.NewSubscription(id, "user-1", "netflix", "Netflix", domain.SubscriptionActive, domain.WindowMonthly, 1500, "USD", now, 3)
+	if err != nil {
+		t.Fatalf("create %s: %v", id, err)
+	}
+	if err := repository.Save(t.Context(), subscription); err != nil {
+		t.Fatalf("save %s: %v", id, err)
+	}
+	return subscription
+}
+
+func cloneOf(t *testing.T, repository *memory.SubscriptionRepository, id domain.SubscriptionID) *domain.Subscription {
+	t.Helper()
+
+	subscription, err := repository.GetByID(t.Context(), id)
+	if err != nil {
+		t.Fatalf("load %s: %v", id, err)
+	}
+	return subscription
 }
 
 func TestApplyDetectionCreatesThenUpdates(t *testing.T) {

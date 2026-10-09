@@ -7,6 +7,7 @@ import (
 
 	"subscriptionfirewall/internal/adapter/memory"
 	"subscriptionfirewall/internal/domain"
+	"subscriptionfirewall/internal/ports"
 )
 
 type frozenClock struct{ now time.Time }
@@ -17,7 +18,7 @@ func monthlyTransactions(userID domain.UserID, merchantID domain.MerchantID, cou
 	transactions := make([]domain.Transaction, 0, count)
 	for i := range count {
 		transactions = append(transactions, domain.Transaction{
-			ID:           domain.TransactionID(string(merchantID) + "-" + string(rune('a'+i))),
+			ID:           domain.TransactionID(string(userID) + "-" + string(merchantID) + "-" + string(rune('a'+i))),
 			UserID:       userID,
 			MerchantID:   merchantID,
 			MerchantName: "Test Merchant",
@@ -107,5 +108,167 @@ func TestDetectClassifiesZombieSubscription(t *testing.T) {
 	}
 	if detections[0].State != domain.SubscriptionZombie {
 		t.Errorf("expected Zombie state, got %s", detections[0].State)
+	}
+}
+
+// countingRepository records which merchants the detector asked to load.
+type countingRepository struct {
+	*memory.TransactionRepository
+	loadedMerchants [][]domain.MerchantID
+}
+
+func (r *countingRepository) ListRecurringMerchantCandidates(
+	ctx context.Context,
+	userID domain.UserID,
+	since time.Time,
+	minOccurrences int,
+) ([]ports.MerchantChargeCount, error) {
+	return r.TransactionRepository.ListRecurringMerchantCandidates(ctx, userID, since, minOccurrences)
+}
+
+func (r *countingRepository) ListByUserAndMerchants(
+	ctx context.Context,
+	userID domain.UserID,
+	merchants []domain.MerchantID,
+	since time.Time,
+) ([]domain.Transaction, error) {
+	r.loadedMerchants = append(r.loadedMerchants, append([]domain.MerchantID(nil), merchants...))
+	return r.TransactionRepository.ListByUserAndMerchants(ctx, userID, merchants, since)
+}
+
+// TestClassifyAgreesWithSweep pins the invariant that the detector's zombie
+// verdict and the sweep's overdue transition are the same rule expressed two
+// ways: MarkMissed compares now against NextExpectedAt = lastChargedAt+window,
+// which is algebraically identical to now-lastChargedAt > 2*window. If either
+// side changes, this test fails.
+func TestClassifyAgreesWithSweep(t *testing.T) {
+	windows := []domain.BillingWindow{domain.WindowWeekly, domain.WindowMonthly, domain.WindowYearly}
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	for _, window := range windows {
+		t.Run(string(window), func(t *testing.T) {
+			for step := range 400 {
+				lastChargedAt := now.Add(-time.Duration(step) * 6 * time.Hour)
+				subscription, err := domain.NewSubscription("sub-1", "user-1", "netflix", "Netflix",
+					domain.SubscriptionActive, window, 1500, "USD", lastChargedAt, 3)
+				if err != nil {
+					t.Fatalf("create: %v", err)
+				}
+				if err := subscription.MarkMissed(now); err != nil {
+					t.Fatalf("mark missed: %v", err)
+				}
+
+				detected := New(nil, frozenClock{now: now}, DefaultConfig()).classify(
+					lastChargedAt, lastChargedAt, domain.MCCDigitalGoodsSubscript, window, now)
+				swept := subscription.State == domain.SubscriptionZombie
+
+				if (detected == domain.SubscriptionZombie) != swept {
+					t.Fatalf("step %d (last charge %s ago): detector says %s, sweep says zombie=%v",
+						step, now.Sub(lastChargedAt), detected, swept)
+				}
+			}
+		})
+	}
+}
+
+func TestDetectIsolatesUsers(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	repository := memory.NewTransactionRepository()
+	ctx := context.Background()
+
+	for _, transaction := range monthlyTransactions("user-with-subscription", "netflix", 4, now) {
+		if err := repository.Save(ctx, transaction); err != nil {
+			t.Fatalf("save recurring: %v", err)
+		}
+	}
+	for _, transaction := range monthlyTransactions("other-user", "netflix", 1, now) {
+		if err := repository.Save(ctx, transaction); err != nil {
+			t.Fatalf("save single charge: %v", err)
+		}
+	}
+
+	service := New(repository, frozenClock{now: now}, DefaultConfig())
+
+	withSubscription, err := service.Detect(ctx, "user-with-subscription")
+	if err != nil {
+		t.Fatalf("detect first user: %v", err)
+	}
+	if len(withSubscription) != 1 {
+		t.Fatalf("expected 1 detection for the subscribing user, got %d", len(withSubscription))
+	}
+
+	other, err := service.Detect(ctx, "other-user")
+	if err != nil {
+		t.Fatalf("detect second user: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("another user's charges must not form a subscription, got %+v", other)
+	}
+}
+
+func TestDetectLoadsOnlyCandidateMerchants(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	repository := &countingRepository{TransactionRepository: memory.NewTransactionRepository()}
+	userID := domain.UserID("user-1")
+	ctx := context.Background()
+
+	// One recurring merchant plus many one-off merchants.
+	for _, transaction := range monthlyTransactions(userID, "netflix", 5, now) {
+		if err := repository.Save(ctx, transaction); err != nil {
+			t.Fatalf("save recurring: %v", err)
+		}
+	}
+	for i := range 50 {
+		transaction := domain.Transaction{
+			ID:           domain.TransactionID("one-off-" + string(rune('a'+i%26)) + "-" + string(rune('0'+i%10))),
+			MerchantID:   domain.MerchantID("shop-" + string(rune('a'+i%26)) + "-" + string(rune('0'+i/26))),
+			MerchantName: "Shop",
+			MCC:          5411,
+			AmountMinor:  500,
+			Currency:     "USD",
+			AuthorizedAt: now.AddDate(0, 0, -i),
+		}
+		if err := repository.Save(ctx, transaction); err != nil {
+			t.Fatalf("save one-off: %v", err)
+		}
+	}
+
+	detections, err := New(repository, frozenClock{now: now}, DefaultConfig()).Detect(ctx, userID)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(detections) != 1 || detections[0].MerchantID != "netflix" {
+		t.Fatalf("expected only the recurring merchant, got %+v", detections)
+	}
+	if len(repository.loadedMerchants) != 1 {
+		t.Fatalf("expected a single history load, got %d", len(repository.loadedMerchants))
+	}
+	if loaded := repository.loadedMerchants[0]; len(loaded) != 1 || loaded[0] != "netflix" {
+		t.Fatalf("expected only netflix to be loaded, got %v", loaded)
+	}
+}
+
+func TestDetectWithoutCandidatesSkipsHistoryLoad(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	repository := &countingRepository{TransactionRepository: memory.NewTransactionRepository()}
+	ctx := context.Background()
+
+	transaction := domain.Transaction{
+		ID: "tx-solo", UserID: "user-1", MerchantID: "coffee", MerchantName: "Coffee",
+		MCC: 5814, AmountMinor: 400, Currency: "USD", AuthorizedAt: now,
+	}
+	if err := repository.Save(ctx, transaction); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	detections, err := New(repository, frozenClock{now: now}, DefaultConfig()).Detect(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(detections) != 0 {
+		t.Fatalf("expected no detections, got %+v", detections)
+	}
+	if len(repository.loadedMerchants) != 0 {
+		t.Fatalf("expected no history load for a user without candidates, got %v", repository.loadedMerchants)
 	}
 }
