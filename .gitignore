@@ -1,8 +1,10 @@
 # Локальные секреты (см. .env.example)
 .env
 
-# Артефакты сборки и тестов
+# Артефакты сборки и тестов.
+# Якорь в начале обязателен: без него правило `firewall` скрывало бы всю
+# папку cmd/firewall/.
 coverage.txt
-firewall
-firewall.exe
+/firewall
+/firewall.exe
 /dist/
