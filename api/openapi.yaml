@@ -438,18 +438,24 @@ components:
       properties:
         id:
           type: string
+          maxLength: 64
+          minLength: 1
           description: Уникальный id транзакции (идемпотентность инжеста).
-        user_id: { type: string }
-        merchant_id: { type: string }
+        user_id: { type: string, maxLength: 64, minLength: 1 }
+        merchant_id: { type: string, maxLength: 64, minLength: 1 }
         merchant_name:
           type: string
+          maxLength: 255
         mcc:
           type: integer
           format: int32
+          minimum: 0
+          maximum: 65535
           description: Merchant category code.
         amount_minor:
           type: integer
           format: int64
+          minimum: 1
           description: Сумма в минорных единицах.
         currency:
           type: string
@@ -460,6 +466,9 @@ components:
         authorized_at:
           type: string
           format: date-time
+          description: >
+            Момент авторизации. Не дальше 24 часов вперёд (допуск расхождения часов)
+            и не старше 2 лет — более старые транзакции вне горизонта детектора.
 
     AuthorizeChargeInput:
       type: object
@@ -468,6 +477,8 @@ components:
         amount_minor:
           type: integer
           format: int64
+          minimum: 1
+          description: Сумма списания в минорных единицах; ноль и отрицательные значения отклоняются.
         currency:
           type: string
           pattern: "^[A-Z]{3}$"

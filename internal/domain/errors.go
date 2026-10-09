@@ -9,4 +9,6 @@ var (
 	ErrTokenNotActive     = errors.New("virtual token is not active")
 	ErrSpendLimitExceeded = errors.New("virtual token spend limit exceeded")
 	ErrUnknownCurrency    = errors.New("currency mismatch")
+	ErrInvalidAmount      = errors.New("charge amount must be positive")
+	ErrInvalidArgument    = errors.New("invalid argument")
 )

@@ -63,6 +63,57 @@ func TestPeriodRollResetsSpending(t *testing.T) {
 	}
 }
 
+func TestAuthorizeChargeRejectsNonPositiveAmount(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	for _, amount := range []int64{0, -1, -10_000} {
+		token, _ := NewVirtualToken("vtok-1", "user-1", "netflix", "411111******1234", 10_000, "USD", now)
+		if err := token.AuthorizeCharge(9_999, "USD", now); err != nil {
+			t.Fatalf("prime spending: %v", err)
+		}
+
+		err := token.AuthorizeCharge(amount, "USD", now)
+		if !errors.Is(err, ErrInvalidAmount) {
+			t.Fatalf("amount %d: expected ErrInvalidAmount, got %v", amount, err)
+		}
+		if snapshot := token.Snapshot(); snapshot.SpentInPeriod != 9_999 {
+			t.Errorf("amount %d: expected spending unchanged at 9999, got %d", amount, snapshot.SpentInPeriod)
+		}
+	}
+}
+
+func TestAuthorizeChargeRejectsInvalidAmountBeforeStateCheck(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	token, _ := NewVirtualToken("vtok-1", "user-1", "netflix", "411111******1234", 10_000, "USD", now)
+	if err := token.Freeze(); err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+
+	if err := token.AuthorizeCharge(-100, "USD", now); !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("expected ErrInvalidAmount to win over frozen state, got %v", err)
+	}
+}
+
+func TestApplyChargeIsolatesFailures(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	token, _ := NewVirtualToken("vtok-1", "user-1", "netflix", "411111******1234", 10_000, "USD", now)
+	if err := token.ApplyCharge(1_000, "USD", now); err != nil {
+		t.Fatalf("prime spending: %v", err)
+	}
+
+	before := token.Snapshot()
+	if err := token.ApplyCharge(0, "USD", now); err == nil {
+		t.Fatal("expected zero amount to be rejected")
+	}
+	if err := token.ApplyCharge(-1, "USD", now); err == nil {
+		t.Fatal("expected negative amount to be rejected")
+	}
+	after := token.Snapshot()
+	if after.SpentInPeriod != before.SpentInPeriod || after.State != before.State {
+		t.Fatalf("rejected charges changed the token: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestTerminatedTokenCannotBeReactivated(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	token, _ := NewVirtualToken("vtok-1", "user-1", "netflix", "411111******1234", 10_000, "USD", now)
