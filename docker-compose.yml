@@ -10,6 +10,8 @@ services:
       SUBSCRIPTION_FIREWALL_QUEUE_CAPACITY: "1024"
       SUBSCRIPTION_FIREWALL_SWEEP_INTERVAL: "1m"
       SUBSCRIPTION_FIREWALL_ISSUER_MONTHLY_LIMIT: "100000"
+      # Заглушка эмитента карт: в продакшене заменить на реального провайдера.
+      SUBSCRIPTION_FIREWALL_ISSUER: "simulated"
       SUBSCRIPTION_FIREWALL_LOG_LEVEL: "${SUBSCRIPTION_FIREWALL_LOG_LEVEL:-info}"
       # По умолчанию — MySQL из этого compose-файла. Для БД на хосте задайте в .env:
       # SUBSCRIPTION_FIREWALL_DB_DSN: "firewall:пароль@tcp(host.docker.internal:3306)/subscription_firewall?parseTime=true&loc=UTC"
