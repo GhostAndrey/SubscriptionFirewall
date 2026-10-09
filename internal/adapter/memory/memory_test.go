@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,100 @@ import (
 	"subscriptionfirewall/internal/domain"
 	"subscriptionfirewall/internal/ports"
 )
+
+func TestPageSliceSemantics(t *testing.T) {
+	items := []string{"a", "b", "c", "d", "e"}
+
+	tests := map[string]struct {
+		page ports.Page
+		want []string
+	}{
+		"unbounded returns everything": {ports.Page{}, []string{"a", "b", "c", "d", "e"}},
+		"first page":                   {ports.Page{Limit: 2}, []string{"a", "b"}},
+		"second page":                  {ports.Page{Limit: 2, Offset: 2}, []string{"c", "d"}},
+		"page past the end":            {ports.Page{Limit: 2, Offset: 10}, []string{}},
+		"offset exactly at the end":    {ports.Page{Limit: 2, Offset: 5}, []string{}},
+		"partial last page":            {ports.Page{Limit: 3, Offset: 4}, []string{"e"}},
+		"limit beyond the end":         {ports.Page{Limit: 100}, []string{"a", "b", "c", "d", "e"}},
+		"zero limit is unbounded":      {ports.Page{Limit: 0, Offset: 1}, []string{"a", "b", "c", "d", "e"}},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := pageSlice(items, test.page)
+			if len(got) != len(test.want) {
+				t.Fatalf("pageSlice = %v, want %v", got, test.want)
+			}
+			for i := range test.want {
+				if got[i] != test.want[i] {
+					t.Fatalf("pageSlice = %v, want %v", got, test.want)
+				}
+			}
+		})
+	}
+}
+
+func TestPageIsUnbounded(t *testing.T) {
+	if (ports.Page{}).IsUnbounded() != true {
+		t.Error("a zero limit must mean unbounded")
+	}
+	if (ports.Page{Limit: -1}).IsUnbounded() != true {
+		t.Error("a negative limit must mean unbounded")
+	}
+	if (ports.Page{Limit: 1}).IsUnbounded() != false {
+		t.Error("a positive limit must be bounded")
+	}
+}
+
+func TestListByUserPageAppliesWindow(t *testing.T) {
+	ctx := context.Background()
+	repository := NewSubscriptionRepository()
+	clock := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	for i := range 5 {
+		created, err := domain.NewSubscription(
+			domain.SubscriptionID(fmt.Sprintf("sub-%02d", i)), "user-page", "merchant-page", "Merchant",
+			domain.SubscriptionActive, domain.WindowMonthly, 1500, "USD", clock, 3)
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		if err := repository.Save(ctx, created); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+
+	first, err := repository.ListByUserPage(ctx, "user-page", ports.Page{Limit: 2})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	if len(first) != 2 || first[0].ID != "sub-00" || first[1].ID != "sub-01" {
+		t.Fatalf("unexpected first page: %v", ids(first))
+	}
+
+	rest, err := repository.ListByUserPage(ctx, "user-page", ports.Page{Limit: 10, Offset: 4})
+	if err != nil {
+		t.Fatalf("second page: %v", err)
+	}
+	if len(rest) != 1 || rest[0].ID != "sub-04" {
+		t.Fatalf("unexpected second page: %v", ids(rest))
+	}
+
+	beyond, err := repository.ListByUserPage(ctx, "user-page", ports.Page{Limit: 2, Offset: 99})
+	if err != nil {
+		t.Fatalf("page beyond the end: %v", err)
+	}
+	if len(beyond) != 0 {
+		t.Fatalf("expected an empty page, got %v", ids(beyond))
+	}
+}
+
+func ids(subscriptions []*domain.Subscription) []string {
+	out := make([]string, 0, len(subscriptions))
+	for _, subscription := range subscriptions {
+		out = append(out, string(subscription.ID))
+	}
+	return out
+}
 
 func TestSubscriptionCreateIfAbsentIsIdempotent(t *testing.T) {
 	ctx := context.Background()
@@ -32,7 +127,7 @@ func TestSubscriptionCreateIfAbsentIsIdempotent(t *testing.T) {
 		t.Fatalf("expected one canonical subscription, got %s and %s", storedFirst.ID, storedSecond.ID)
 	}
 
-	listed, err := repository.ListByUser(ctx, "user-1")
+	listed, err := repository.ListByUserPage(ctx, "user-1", ports.Page{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

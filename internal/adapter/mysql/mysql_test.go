@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -231,6 +232,86 @@ func TestSubscriptionUpdateVersionRejectsStaleWrite(t *testing.T) {
 	}
 	if err := repository.UpdateVersion(ctx, missing); !isNotFound(err) {
 		t.Fatalf("expected ErrNotFound for an unknown subscription, got %v", err)
+	}
+}
+
+func TestListByUserPagePaginatesInSQL(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	const total = 5
+
+	subscriptions := NewSubscriptionRepository(db)
+	for i := range total {
+		created, err := domain.NewSubscription(
+			domain.SubscriptionID(fmt.Sprintf("sub-page-%02d", i)), "user-page",
+			domain.MerchantID(fmt.Sprintf("merchant-page-%02d", i)), "Merchant",
+			domain.SubscriptionActive, domain.WindowMonthly, 1500, "USD", now, 3)
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		if err := subscriptions.Save(ctx, created); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+
+	all, err := subscriptions.ListByUserPage(ctx, "user-page", ports.Page{})
+	if err != nil || len(all) != total {
+		t.Fatalf("unbounded page = %d rows (%v), want %d", len(all), err, total)
+	}
+
+	var walked []string
+	const pageSize = 2
+	for offset := 0; offset < total; offset += pageSize {
+		page, err := subscriptions.ListByUserPage(ctx, "user-page", ports.Page{Limit: pageSize, Offset: offset})
+		if err != nil {
+			t.Fatalf("page at offset %d: %v", offset, err)
+		}
+		if len(page) > pageSize {
+			t.Fatalf("page at offset %d returned %d rows, want at most %d", offset, len(page), pageSize)
+		}
+		for _, subscription := range page {
+			walked = append(walked, string(subscription.ID))
+		}
+	}
+	if len(walked) != total {
+		t.Fatalf("paging walked %d rows, want %d", len(walked), total)
+	}
+	seen := map[string]int{}
+	for i, id := range walked {
+		if want := fmt.Sprintf("sub-page-%02d", i); id != want {
+			t.Fatalf("row %d = %s, want %s (ordering must be stable)", i, id, want)
+		}
+		seen[id]++
+	}
+	if len(seen) != total {
+		t.Fatalf("paging returned duplicates: %v", walked)
+	}
+
+	beyond, err := subscriptions.ListByUserPage(ctx, "user-page", ports.Page{Limit: 2, Offset: 99})
+	if err != nil || len(beyond) != 0 {
+		t.Fatalf("page beyond the end = %d rows (%v), want 0", len(beyond), err)
+	}
+
+	tokens := NewVirtualTokenRepository(db)
+	for i := range total {
+		token, err := domain.NewVirtualToken(
+			domain.VirtualTokenID(fmt.Sprintf("vtok-page-%02d", i)), "user-page",
+			domain.MerchantID(fmt.Sprintf("merchant-page-%02d", i)), "411111******1234", 10_000, "USD", now)
+		if err != nil {
+			t.Fatalf("create token %d: %v", i, err)
+		}
+		if err := tokens.Save(ctx, token); err != nil {
+			t.Fatalf("save token %d: %v", i, err)
+		}
+	}
+
+	firstTokens, err := tokens.ListByUserPage(ctx, "user-page", ports.Page{Limit: 3})
+	if err != nil || len(firstTokens) != 3 {
+		t.Fatalf("token page = %d rows (%v), want 3", len(firstTokens), err)
+	}
+	if firstTokens[0].ID != "vtok-page-00" {
+		t.Errorf("first token = %s, want vtok-page-00", firstTokens[0].ID)
 	}
 }
 
@@ -802,7 +883,7 @@ func TestSubscriptionCreateIfAbsentConverges(t *testing.T) {
 		t.Fatalf("expected both callers to see one subscription, got %s and %s", storedFirst.ID, storedSecond.ID)
 	}
 
-	listed, err := repository.ListByUser(ctx, "user-1")
+	listed, err := repository.ListByUserPage(ctx, "user-1", ports.Page{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
