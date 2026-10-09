@@ -70,17 +70,17 @@ func (o *Outbox) ClaimBatch(ctx context.Context, limit int) ([]ports.OutboxItem,
 	if err != nil {
 		return nil, fmt.Errorf("select pending outbox items: %w", err)
 	}
+	defer rows.Close()
+
 	items := make([]ports.OutboxItem, 0, limit)
 	for rows.Next() {
 		var item ports.OutboxItem
 		if err := rows.Scan(&item.ID, &item.UserID, &item.Attempts); err != nil {
-			rows.Close()
 			return nil, fmt.Errorf("scan outbox item: %w", err)
 		}
 		item.Attempts++
 		items = append(items, item)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate outbox items: %w", err)
 	}

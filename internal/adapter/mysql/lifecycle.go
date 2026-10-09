@@ -50,18 +50,12 @@ func (q *LifecycleSyncQueue) ClaimBatch(ctx context.Context, limit int) ([]ports
 	if err != nil {
 		return nil, fmt.Errorf("select pending lifecycle syncs: %w", err)
 	}
+	defer rows.Close()
 
 	tasks := make([]ports.LifecycleSyncTask, 0, limit)
-	for rows.Next() {
-		var task ports.LifecycleSyncTask
-		if err := rows.Scan(&task.ID, &task.EntityType, &task.EntityID, &task.Action, &task.Attempts); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan lifecycle sync: %w", err)
-		}
-		task.Attempts++
-		tasks = append(tasks, task)
+	if err := scanLifecycleTasks(rows, &tasks, limit); err != nil {
+		return nil, err
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate lifecycle syncs: %w", err)
 	}
@@ -84,6 +78,21 @@ func (q *LifecycleSyncQueue) ClaimBatch(ctx context.Context, limit int) ([]ports
 		return nil, fmt.Errorf("commit lifecycle sync claim: %w", err)
 	}
 	return tasks, nil
+}
+
+func scanLifecycleTasks(rows *sql.Rows, tasks *[]ports.LifecycleSyncTask, limit int) error {
+	for rows.Next() {
+		var task ports.LifecycleSyncTask
+		if err := rows.Scan(&task.ID, &task.EntityType, &task.EntityID, &task.Action, &task.Attempts); err != nil {
+			return fmt.Errorf("scan lifecycle sync: %w", err)
+		}
+		task.Attempts++
+		*tasks = append(*tasks, task)
+		if len(*tasks) == limit {
+			return nil
+		}
+	}
+	return nil
 }
 
 func (q *LifecycleSyncQueue) Complete(ctx context.Context, ids []int64) error {

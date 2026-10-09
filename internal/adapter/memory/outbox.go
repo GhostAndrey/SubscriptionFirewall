@@ -37,8 +37,8 @@ func NewDetectionOutbox(
 	}
 }
 
-func (o *DetectionOutbox) EnqueueWithTransaction(_ context.Context, transaction domain.Transaction) error {
-	if err := o.transactions.Save(context.Background(), transaction); err != nil {
+func (o *DetectionOutbox) EnqueueWithTransaction(ctx context.Context, transaction domain.Transaction) error {
+	if err := o.transactions.Save(ctx, transaction); err != nil {
 		return err
 	}
 	o.mu.Lock()

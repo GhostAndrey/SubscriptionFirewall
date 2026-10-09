@@ -37,6 +37,7 @@ const (
 	defaultWorkerCount         = 4
 	defaultSweepInterval       = time.Minute
 	defaultMonthlyLimitMinor   = 100_000
+	healthcheckTimeout         = 2 * time.Second
 )
 
 type config struct {
@@ -234,8 +235,17 @@ func main() {
 // production image (distroless) ships no shell or curl.
 func runHealthcheck() int {
 	target := "http://127.0.0.1" + addressPort(configuredAddress()) + "/readyz"
-	client := &http.Client{Timeout: 2 * time.Second}
-	response, err := client.Get(target)
+	client := &http.Client{Timeout: healthcheckTimeout}
+
+	ctx, cancel := context.WithTimeout(context.Background(), healthcheckTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck failed: %v\n", err)
+		return 1
+	}
+
+	response, err := client.Do(request)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "healthcheck failed: %v\n", err)
 		return 1

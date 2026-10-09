@@ -157,7 +157,10 @@ func observationMiddleware(logger *slog.Logger, metrics *obs.Metrics, next http.
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w}
 
-		defer func() {
+		// The deferred observer reads the request context captured by the
+		// closure, which is the context the handler runs under. contextcheck
+		// cannot see that indirection.
+		defer func() { //nolint:contextcheck // see above
 			route := r.Pattern
 			if route == "" {
 				route = "unmatched"
@@ -179,7 +182,10 @@ func observationMiddleware(logger *slog.Logger, metrics *obs.Metrics, next http.
 
 func recoveryMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
+		// The deferred guard reads the request context captured by the closure, which
+		// is the context the handler runs under. contextcheck cannot see that
+		// indirection.
+		defer func() { //nolint:contextcheck // see above
 			recovered := recover()
 			if recovered == nil {
 				return

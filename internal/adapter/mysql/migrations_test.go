@@ -40,75 +40,85 @@ type schemaObjects struct {
 func readSchema(t *testing.T, db *sql.DB) schemaObjects {
 	t.Helper()
 
-	ctx := context.Background()
 	objects := schemaObjects{
 		tables:  map[string]bool{},
 		columns: map[string]map[string]bool{},
 		indexes: map[string]map[string]bool{},
 	}
 
-	rows, err := db.QueryContext(ctx,
-		`SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()`)
-	if err != nil {
-		t.Fatalf("read tables: %v", err)
-	}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			t.Fatalf("scan table: %v", err)
-		}
+	ctx := context.Background()
+	for name := range queryNames(ctx, t, db,
+		`SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()`) {
 		objects.tables[name] = true
 		objects.columns[name] = map[string]bool{}
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate tables: %v", err)
-	}
-
-	rows, err = db.QueryContext(ctx,
-		`SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = DATABASE()`)
-	if err != nil {
-		t.Fatalf("read columns: %v", err)
-	}
-	for rows.Next() {
-		var table, column string
-		if err := rows.Scan(&table, &column); err != nil {
-			rows.Close()
-			t.Fatalf("scan column: %v", err)
+	for pair := range queryPairs(ctx, t, db,
+		`SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = DATABASE()`) {
+		if objects.columns[pair.First] == nil {
+			objects.columns[pair.First] = map[string]bool{}
 		}
-		if objects.columns[table] == nil {
-			objects.columns[table] = map[string]bool{}
-		}
-		objects.columns[table][column] = true
+		objects.columns[pair.First][pair.Second] = true
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate columns: %v", err)
-	}
-
-	rows, err = db.QueryContext(ctx,
+	for pair := range queryPairs(ctx, t, db,
 		`SELECT table_name, index_name FROM information_schema.statistics
-		 WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY'`)
-	if err != nil {
-		t.Fatalf("read indexes: %v", err)
-	}
-	for rows.Next() {
-		var table, index string
-		if err := rows.Scan(&table, &index); err != nil {
-			rows.Close()
-			t.Fatalf("scan index: %v", err)
+		 WHERE table_schema = DATABASE() AND index_name <> 'PRIMARY'`) {
+		if objects.indexes[pair.First] == nil {
+			objects.indexes[pair.First] = map[string]bool{}
 		}
-		if objects.indexes[table] == nil {
-			objects.indexes[table] = map[string]bool{}
-		}
-		objects.indexes[table][index] = true
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate indexes: %v", err)
+		objects.indexes[pair.First][pair.Second] = true
 	}
 	return objects
+}
+
+func queryNames(ctx context.Context, t *testing.T, db *sql.DB, query string) map[string]struct{} {
+	t.Helper()
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+
+	result := map[string]struct{}{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		result[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	return result
+}
+
+type namePair struct {
+	First  string
+	Second string
+}
+
+func queryPairs(ctx context.Context, t *testing.T, db *sql.DB, query string) map[namePair]string {
+	t.Helper()
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+
+	result := map[namePair]string{}
+	for rows.Next() {
+		var pair namePair
+		if err := rows.Scan(&pair.First, &pair.Second); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		result[pair] = pair.Second
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	return result
 }
 
 func assertIndex(t *testing.T, objects schemaObjects, table, index string) {

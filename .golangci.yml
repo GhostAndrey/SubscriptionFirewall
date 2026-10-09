@@ -8,6 +8,17 @@ linters:
     - unconvert
     - unparam
     - wastedassign
+    # Сервис работает с SQL и HTTP: проверки на незакрытые ресурсы и
+    # потерянный контекст ловят утечки, которые в этом коде дорого стоят.
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - noctx
+    - contextcheck
+    - durationcheck
+    - makezero
+    - mirror
+    - prealloc
   settings:
     errcheck:
       # Отложенная очистка ресурсов: ошибка Close/Rollback в defer
@@ -17,6 +28,18 @@ linters:
         - (*database/sql.Rows).Close
         - (*database/sql.Tx).Rollback
         - (io.ReadCloser).Close
+    prealloc:
+      simple: true
+  exclusions:
+    rules:
+      # В тестах контекст и закрытие body не несут смысловой нагрузки:
+      # t.Cleanup освобождает ресурс, а httptest-запросы живут миллисекунды.
+      # Проверки остаются включёнными для production-кода.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - contextcheck
+          - noctx
 
 formatters:
   enable:
