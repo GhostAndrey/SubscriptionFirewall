@@ -2,6 +2,8 @@ package subscription
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -24,7 +26,7 @@ func TestSweepMarksOverdueSubscriptionZombie(t *testing.T) {
 		t.Fatalf("save subscription: %v", err)
 	}
 
-	changed, err := service.Sweep(context.Background())
+	changed, err := service.Sweep(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -63,12 +65,77 @@ func TestSweepSkipsCurrentAndFrozenSubscriptions(t *testing.T) {
 		}
 	}
 
-	changed, err := service.Sweep(context.Background())
+	changed, err := service.Sweep(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if len(changed) != 0 {
 		t.Fatalf("expected no changes, got %+v", changed)
+	}
+}
+
+func TestSweepProcessesBacklogInBatches(t *testing.T) {
+	repository := memory.NewSubscriptionRepository()
+	now := time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)
+	service := NewService(repository, fixedClock{now: now})
+
+	const total = 7
+	for i := range total {
+		lastChargedAt := now.Add(-time.Duration(90+i) * 24 * time.Hour)
+		created, err := domain.NewSubscription(
+			domain.SubscriptionID(fmt.Sprintf("sub-%02d", i)), "user-1",
+			domain.MerchantID(fmt.Sprintf("merchant-%02d", i)), "Merchant",
+			domain.SubscriptionActive, domain.WindowMonthly, 1500, "USD", lastChargedAt, 3)
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		if err := repository.Save(context.Background(), created); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+
+	changed, err := service.Sweep(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if len(changed) != total {
+		t.Fatalf("expected all %d overdue subscriptions to be swept, got %d", total, len(changed))
+	}
+	for i := range total {
+		persisted, err := repository.GetByID(context.Background(), domain.SubscriptionID(fmt.Sprintf("sub-%02d", i)))
+		if err != nil {
+			t.Fatalf("load sub-%02d: %v", i, err)
+		}
+		if persisted.State != domain.SubscriptionZombie {
+			t.Errorf("sub-%02d expected Zombie, got %s", i, persisted.State)
+		}
+	}
+}
+
+func TestSweepStopsOnContextCancellation(t *testing.T) {
+	repository := memory.NewSubscriptionRepository()
+	now := time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)
+	service := NewService(repository, fixedClock{now: now})
+
+	for i := range 10 {
+		created, err := domain.NewSubscription(
+			domain.SubscriptionID(fmt.Sprintf("sub-%02d", i)), "user-1",
+			domain.MerchantID(fmt.Sprintf("merchant-%02d", i)), "Merchant",
+			domain.SubscriptionActive, domain.WindowMonthly, 1500, "USD",
+			now.Add(-time.Duration(90+i)*24*time.Hour), 3)
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		if err := repository.Save(context.Background(), created); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := service.Sweep(ctx, 5); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
 

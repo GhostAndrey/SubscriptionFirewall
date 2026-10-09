@@ -43,7 +43,7 @@ func TestStopDrainsQueuedUsers(t *testing.T) {
 		outbox,
 		detector.New(transactions, memory.Clock{}, detector.DefaultConfig()),
 		subscription.NewService(subscriptions, memory.Clock{}),
-		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}),
+		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
 	)
@@ -66,7 +66,7 @@ func TestStopIsIdempotentAndOutboxRejectsAfterStop(t *testing.T) {
 		outbox,
 		detector.New(transactions, memory.Clock{}, detector.DefaultConfig()),
 		subscription.NewService(memory.NewSubscriptionRepository(), memory.Clock{}),
-		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}),
+		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
 	)

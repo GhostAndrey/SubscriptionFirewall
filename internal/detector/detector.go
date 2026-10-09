@@ -10,6 +10,10 @@ import (
 	"subscriptionfirewall/internal/ports"
 )
 
+// subscriptionOccurrences is the payment count that already makes a
+// subscription-prone category look recurring.
+const subscriptionOccurrences = 2
+
 type Config struct {
 	AnalysisHorizon    time.Duration
 	MinimumOccurrences int
@@ -36,11 +40,29 @@ func New(transactions ports.TransactionRepository, clock ports.Clock, config Con
 	return &Detector{transactions: transactions, clock: clock, config: config}
 }
 
+// Detect finds recurring subscriptions for a user. Candidates are narrowed in
+// the storage layer first, so merchants with too few charges never have their
+// history loaded into memory.
 func (d *Detector) Detect(ctx context.Context, userID domain.UserID) ([]domain.DetectedSubscription, error) {
 	horizonStart := d.clock.Now().Add(-d.config.AnalysisHorizon)
-	transactions, err := d.transactions.ListByUserSince(ctx, userID, horizonStart)
+
+	candidates, err := d.transactions.ListRecurringMerchantCandidates(
+		ctx, userID, horizonStart, d.minimumRequiredOccurrences())
 	if err != nil {
-		return nil, fmt.Errorf("list transactions for user %s: %w", userID, err)
+		return nil, fmt.Errorf("list merchant candidates for user %s: %w", userID, err)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	merchants := make([]domain.MerchantID, 0, len(candidates))
+	for _, candidate := range candidates {
+		merchants = append(merchants, candidate.MerchantID)
+	}
+
+	transactions, err := d.transactions.ListByUserAndMerchants(ctx, userID, merchants, horizonStart)
+	if err != nil {
+		return nil, fmt.Errorf("list candidate transactions for user %s: %w", userID, err)
 	}
 
 	byMerchant := groupByMerchant(transactions)
@@ -54,6 +76,17 @@ func (d *Detector) Detect(ctx context.Context, userID domain.UserID) ([]domain.D
 		return detections[i].LastChargedAt.After(detections[j].LastChargedAt)
 	})
 	return detections, nil
+}
+
+// minimumRequiredOccurrences is the lowest payment count a merchant must reach
+// to be looked at at all. Subscription-prone categories need fewer payments
+// than the general threshold, so the exact rule is still applied per merchant
+// after the pre-filter.
+func (d *Detector) minimumRequiredOccurrences() int {
+	if d.config.MinimumOccurrences < subscriptionOccurrences {
+		return d.config.MinimumOccurrences
+	}
+	return subscriptionOccurrences
 }
 
 func (d *Detector) detectRecurring(userID domain.UserID, merchantID domain.MerchantID, merchantTransactions []domain.Transaction) (domain.DetectedSubscription, bool) {
@@ -107,7 +140,7 @@ func (d *Detector) classify(firstChargedAt, lastChargedAt time.Time, mcc domain.
 
 func (d *Detector) requiredOccurrences(mcc domain.MCC) int {
 	if mcc.IsSubscriptionProne() {
-		return 2
+		return subscriptionOccurrences
 	}
 	return d.config.MinimumOccurrences
 }

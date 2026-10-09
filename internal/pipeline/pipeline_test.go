@@ -30,7 +30,7 @@ func TestPipelineDetectsAndStopsGracefully(t *testing.T) {
 	subscriptions := memory.NewSubscriptionRepository()
 	tokens := memory.NewVirtualTokenRepository()
 	subscriptionService := subscription.NewService(subscriptions, clock)
-	tokenService := token.NewService(tokens, stubIssuer{}, clock)
+	tokenService := token.NewService(tokens, stubIssuer{}, clock, token.Options{})
 	outbox := memory.NewDetectionOutbox(transactions, obs.NewMetrics(prometheus.NewRegistry()), testLogger(), 16)
 
 	pipelineService := New(
@@ -82,9 +82,8 @@ func (c fixedClock) Now() time.Time { return c.now }
 
 type stubIssuer struct{}
 
-func (stubIssuer) Issue(_ context.Context, userID domain.UserID, merchantID domain.MerchantID) (ports.IssuedCard, error) {
+func (stubIssuer) Issue(_ context.Context, request ports.IssueRequest) (ports.IssuedCard, error) {
 	return ports.IssuedCard{
-		TokenID:      domain.VirtualTokenID("vtok-test"),
 		MaskedPAN:    "411111******1234",
 		MonthlyLimit: 100_000,
 		Currency:     "USD",

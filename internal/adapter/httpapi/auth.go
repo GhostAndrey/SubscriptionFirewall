@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
@@ -99,17 +100,26 @@ func (a *apiKeyAuthenticator) middleware(logger *slog.Logger, next http.Handler)
 	})
 }
 
+// matches walks every configured key without early exit so the number of
+// comparisons does not depend on which key matched. Values are hashed first
+// because ConstantTimeCompare short-circuits on differing lengths, which would
+// otherwise leak the configured key length through response timing.
 func (a *apiKeyAuthenticator) matches(presented string) (apiKey, bool) {
 	var found apiKey
 	matched := false
-	presentedBytes := []byte(presented)
+
 	for _, key := range a.keys {
-		if subtle.ConstantTimeCompare([]byte(key.value), presentedBytes) == 1 {
+		if subtle.ConstantTimeCompare(apiKeyDigest(key.value), apiKeyDigest(presented)) == 1 {
 			found = key
 			matched = true
 		}
 	}
 	return found, matched
+}
+
+func apiKeyDigest(value string) []byte {
+	digest := sha256.Sum256([]byte(value))
+	return digest[:]
 }
 
 var publicPaths = map[string]bool{

@@ -1,17 +1,14 @@
 package httpapi
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"subscriptionfirewall/internal/domain"
-	"subscriptionfirewall/internal/ports"
 	"subscriptionfirewall/pkg/masking"
 )
 
@@ -44,40 +41,19 @@ func (r ingestTransactionRequest) toDomain() (domain.Transaction, error) {
 	}, nil
 }
 
-func (r ingestTransactionRequest) validate() error {
-	if strings.TrimSpace(r.ID) == "" {
-		return errors.New("id is required")
-	}
-	if strings.TrimSpace(r.UserID) == "" {
-		return errors.New("user_id is required")
-	}
-	if strings.TrimSpace(r.MerchantID) == "" {
-		return errors.New("merchant_id is required")
-	}
-	if r.AmountMinor <= 0 {
-		return errors.New("amount_minor must be positive")
-	}
-	if !isISOCurrency(r.Currency) {
-		return errors.New("currency must be a 3-letter ISO code")
-	}
-	return nil
-}
-
-func isISOCurrency(currency string) bool {
-	if len(currency) != 3 {
-		return false
-	}
-	for _, letter := range currency {
-		if letter < 'A' || letter > 'Z' {
-			return false
-		}
-	}
-	return true
-}
-
 type authorizeChargeRequest struct {
 	AmountMinor int64  `json:"amount_minor"`
 	Currency    string `json:"currency"`
+}
+
+func (r authorizeChargeRequest) validate() error {
+	if r.AmountMinor <= 0 {
+		return errors.New("amount_minor must be positive")
+	}
+	if !domain.IsISOCurrency(r.Currency) {
+		return errors.New("currency must be a 3-letter ISO code")
+	}
+	return nil
 }
 
 const (
@@ -116,16 +92,17 @@ func (s *Server) handleIngestTransaction(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
-	if err := request.validate(); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
-		return
-	}
 
 	transaction, err := request.toDomain()
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
+	if err := transaction.Validate(s.clock.Now()); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		return
+	}
+
 	if _, err := s.transactions.GetByID(r.Context(), transaction.ID); err == nil {
 		writeError(w, fmt.Errorf("transaction %s: %w", transaction.ID, domain.ErrAlreadyExists))
 		return
@@ -180,36 +157,29 @@ func (s *Server) handleGetSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFreezeSubscription(w http.ResponseWriter, r *http.Request) {
-	subscription, err := s.subscriptions.Freeze(r.Context(), domain.SubscriptionID(r.PathValue("id")))
+	subscription, err := s.lifecycle.FreezeSubscription(r.Context(), actorFromContext(r.Context()), domain.SubscriptionID(r.PathValue("id")))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-
-	s.applyLinkedTokenAction(r.Context(), subscription, s.tokens.Freeze)
-	s.recordAudit(r, "freeze", "subscription", string(subscription.ID))
 	writeJSON(w, http.StatusOK, toSubscriptionView(subscription))
 }
 
 func (s *Server) handleReactivateSubscription(w http.ResponseWriter, r *http.Request) {
-	subscription, err := s.subscriptions.Reactivate(r.Context(), domain.SubscriptionID(r.PathValue("id")))
+	subscription, err := s.lifecycle.ReactivateSubscription(r.Context(), actorFromContext(r.Context()), domain.SubscriptionID(r.PathValue("id")))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	s.applyLinkedTokenAction(r.Context(), subscription, s.tokens.Reactivate)
-	s.recordAudit(r, "reactivate", "subscription", string(subscription.ID))
 	writeJSON(w, http.StatusOK, toSubscriptionView(subscription))
 }
 
 func (s *Server) handleTerminateSubscription(w http.ResponseWriter, r *http.Request) {
-	subscription, err := s.subscriptions.Terminate(r.Context(), domain.SubscriptionID(r.PathValue("id")))
+	subscription, err := s.lifecycle.TerminateSubscription(r.Context(), actorFromContext(r.Context()), domain.SubscriptionID(r.PathValue("id")))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	s.applyLinkedTokenAction(r.Context(), subscription, s.tokens.Terminate)
-	s.recordAudit(r, "terminate", "subscription", string(subscription.ID))
 	writeJSON(w, http.StatusOK, toSubscriptionView(subscription))
 }
 
@@ -242,7 +212,7 @@ func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFreezeToken(w http.ResponseWriter, r *http.Request) {
-	token, err := s.tokens.Freeze(r.Context(), domain.VirtualTokenID(r.PathValue("id")))
+	token, err := s.lifecycle.FreezeToken(r.Context(), actorFromContext(r.Context()), domain.VirtualTokenID(r.PathValue("id")))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -252,36 +222,34 @@ func (s *Server) handleFreezeToken(w http.ResponseWriter, r *http.Request) {
 		"token", masking.Token(string(token.ID)),
 		"merchant_id", string(token.MerchantID),
 	)
-	s.applyLinkedSubscriptionAction(r.Context(), token, s.subscriptions.Freeze)
-	s.recordAudit(r, "freeze", "token", string(token.ID))
 	writeJSON(w, http.StatusOK, toTokenView(token))
 }
 
 func (s *Server) handleReactivateToken(w http.ResponseWriter, r *http.Request) {
-	token, err := s.tokens.Reactivate(r.Context(), domain.VirtualTokenID(r.PathValue("id")))
+	token, err := s.lifecycle.ReactivateToken(r.Context(), actorFromContext(r.Context()), domain.VirtualTokenID(r.PathValue("id")))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	s.applyLinkedSubscriptionAction(r.Context(), token, s.subscriptions.Reactivate)
-	s.recordAudit(r, "reactivate", "token", string(token.ID))
 	writeJSON(w, http.StatusOK, toTokenView(token))
 }
 
 func (s *Server) handleTerminateToken(w http.ResponseWriter, r *http.Request) {
-	token, err := s.tokens.Terminate(r.Context(), domain.VirtualTokenID(r.PathValue("id")))
+	token, err := s.lifecycle.TerminateToken(r.Context(), actorFromContext(r.Context()), domain.VirtualTokenID(r.PathValue("id")))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	s.applyLinkedSubscriptionAction(r.Context(), token, s.subscriptions.Terminate)
-	s.recordAudit(r, "terminate", "token", string(token.ID))
 	writeJSON(w, http.StatusOK, toTokenView(token))
 }
 
 func (s *Server) handleAuthorizeCharge(w http.ResponseWriter, r *http.Request) {
 	request, err := decodeJSON[authorizeChargeRequest](r)
 	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		return
+	}
+	if err := request.validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
@@ -297,62 +265,16 @@ func (s *Server) handleAuthorizeCharge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
 }
 
-func (s *Server) recordAudit(r *http.Request, action, entityType, entityID string) {
-	if s.audit == nil {
-		return
-	}
-	entry := ports.AuditEntry{
-		Actor:      actorFromContext(r.Context()),
-		Action:     action,
-		EntityType: entityType,
-		EntityID:   entityID,
-	}
-	if err := s.audit.Record(r.Context(), entry); err != nil {
-		s.logger.Warn("audit record failed", "action", action, "entity_id", entityID, "error", err)
-	}
-}
-
-func (s *Server) applyLinkedTokenAction(ctx context.Context, subscription *domain.Subscription, action func(context.Context, domain.VirtualTokenID) (*domain.VirtualToken, error)) {
-	if subscription.VirtualTokenID == "" {
-		return
-	}
-	if _, err := action(ctx, domain.VirtualTokenID(subscription.VirtualTokenID)); err != nil {
-		if !errors.Is(err, domain.ErrNotFound) {
-			s.logger.Warn("linked token action failed",
-				"subscription_id", string(subscription.ID),
-				"virtual_token_id", subscription.VirtualTokenID,
-				"error", err,
-			)
-		}
-	}
-}
-
-func (s *Server) applyLinkedSubscriptionAction(ctx context.Context, token *domain.VirtualToken, action func(context.Context, domain.SubscriptionID) (*domain.Subscription, error)) {
-	subscription, err := s.subscriptions.GetByUserAndMerchant(ctx, token.UserID, token.MerchantID)
-	if err != nil {
-		if !errors.Is(err, domain.ErrNotFound) {
-			s.logger.Warn("linked subscription lookup failed",
-				"token", masking.Token(string(token.ID)),
-				"error", err,
-			)
-		}
-		return
-	}
-	if _, err := action(ctx, subscription.ID); err != nil {
-		s.logger.Warn("linked subscription action failed",
-			"subscription_id", string(subscription.ID),
-			"token", masking.Token(string(token.ID)),
-			"error", err,
-		)
-	}
-}
-
 func authorizationResult(err error) string {
 	switch {
 	case errors.Is(err, domain.ErrSpendLimitExceeded):
 		return "declined_spend_limit"
 	case errors.Is(err, domain.ErrTokenNotActive):
 		return "declined_token_state"
+	case errors.Is(err, domain.ErrInvalidAmount):
+		return "declined_invalid_amount"
+	case errors.Is(err, domain.ErrUnknownCurrency):
+		return "declined_currency"
 	default:
 		return "declined_other"
 	}

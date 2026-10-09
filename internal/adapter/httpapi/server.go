@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"subscriptionfirewall/internal/lifecycle"
 	"subscriptionfirewall/internal/obs"
 	"subscriptionfirewall/internal/ports"
 	"subscriptionfirewall/internal/subscription"
@@ -22,10 +24,11 @@ type Server struct {
 	transactions  ports.TransactionRepository
 	subscriptions *subscription.Service
 	tokens        *token.Service
+	lifecycle     *lifecycle.Service
 	outbox        ports.DetectionOutbox
-	audit         ports.AuditLog
 	metrics       *obs.Metrics
 	logger        *slog.Logger
+	clock         ports.Clock
 	readiness     func(ctx context.Context) error
 	redis         *redis.Client
 	http          *http.Server
@@ -37,8 +40,16 @@ type Config struct {
 	WriteTimeout    time.Duration
 	ShutdownTimeout time.Duration
 	APIKeys         []string
-	RateLimit       float64
-	RateBurst       int
+	// AllowNoAuth starts the server without API key verification. It must be
+	// set explicitly for every environment where keys are absent, because
+	// without either keys or this flag NewServer refuses to start instead of
+	// serving an open API.
+	AllowNoAuth bool
+	RateLimit   float64
+	RateBurst   int
+	// Clock is the time source used by request validation; nil falls back to
+	// the system clock.
+	Clock ports.Clock
 	// Readiness reports whether the service can serve traffic; nil means always ready.
 	Readiness func(ctx context.Context) error
 	// Tracing wraps the mux with OpenTelemetry HTTP spans. OTLP export is
@@ -55,19 +66,32 @@ func NewServer(
 	transactions ports.TransactionRepository,
 	subscriptions *subscription.Service,
 	tokens *token.Service,
+	lifecycleService *lifecycle.Service,
 	outbox ports.DetectionOutbox,
-	audit ports.AuditLog,
 	metrics *obs.Metrics,
 	logger *slog.Logger,
-) *Server {
+) (*Server, error) {
+	authenticator := newAPIKeyAuthenticator(config.APIKeys)
+	if !authenticator.enabled() && !config.AllowNoAuth {
+		return nil, errors.New("httpapi: no api keys configured; set APIKeys or AllowNoAuth")
+	}
+	if !authenticator.enabled() {
+		logger.Warn("api authentication disabled: started with AllowNoAuth and no api keys")
+	}
+
+	clock := config.Clock
+	if clock == nil {
+		clock = systemClock{}
+	}
 	server := &Server{
 		transactions:  transactions,
 		subscriptions: subscriptions,
 		tokens:        tokens,
+		lifecycle:     lifecycleService,
 		outbox:        outbox,
-		audit:         audit,
 		metrics:       metrics,
 		logger:        logger,
+		clock:         clock,
 		readiness:     config.Readiness,
 	}
 	mux := http.NewServeMux()
@@ -88,11 +112,6 @@ func NewServer(
 	mux.HandleFunc("POST /v1/tokens/{id}/terminate", server.handleTerminateToken)
 	mux.HandleFunc("POST /v1/tokens/{id}/authorize", server.handleAuthorizeCharge)
 
-	authenticator := newAPIKeyAuthenticator(config.APIKeys)
-	if !authenticator.enabled() {
-		logger.Warn("api authentication disabled: no api keys configured")
-	}
-
 	limiterMiddleware := func(next http.Handler) http.Handler { return next }
 	if limiter := newIPRateLimiter(config.RateLimit, config.RateBurst); limiter != nil {
 		limiterMiddleware = limiter.middleware
@@ -102,7 +121,7 @@ func NewServer(
 			Addr:     config.RedisAddr,
 			Password: config.RedisPassword,
 		})
-		if redisLimiter := newRedisRateLimiter(redisClient, int(config.RateLimit), logger); redisLimiter != nil {
+		if redisLimiter := newRedisRateLimiter(redisClient, int(config.RateLimit), config.RateBurst, logger); redisLimiter != nil {
 			limiterMiddleware = redisLimiter.middleware
 			server.redis = redisClient
 		} else {
@@ -119,17 +138,17 @@ func NewServer(
 		)
 	}
 
-	handler := server.requestIDMiddleware(loggingMiddleware(logger, recoveryMiddleware(logger,
-		metricsMiddleware(metrics,
+	handler := server.requestIDMiddleware(observationMiddleware(logger, metrics,
+		recoveryMiddleware(logger,
 			limiterMiddleware(
-				authenticator.middleware(logger, instrumented))))))
+				authenticator.middleware(logger, instrumented)))))
 	server.http = &http.Server{
 		Addr:         config.Address,
 		Handler:      handler,
 		ReadTimeout:  config.ReadTimeout,
 		WriteTimeout: config.WriteTimeout,
 	}
-	return server
+	return server, nil
 }
 
 func (s *Server) ListenAndServe() error {
@@ -169,3 +188,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 		"build_date": version.BuildDate,
 	})
 }
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }

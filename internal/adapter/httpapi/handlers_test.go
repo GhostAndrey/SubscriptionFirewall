@@ -4,20 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-
-	"subscriptionfirewall/internal/adapter/issuer"
 	"subscriptionfirewall/internal/adapter/memory"
 	"subscriptionfirewall/internal/domain"
-	"subscriptionfirewall/internal/obs"
-	"subscriptionfirewall/internal/subscription"
-	"subscriptionfirewall/internal/token"
 )
 
 type handlerTestFixture struct {
@@ -31,35 +25,19 @@ type handlerTestFixture struct {
 func newHandlerTestFixture(t *testing.T) *handlerTestFixture {
 	t.Helper()
 
-	transactionRepository := memory.NewTransactionRepository()
-	subscriptionRepo := memory.NewSubscriptionRepository()
-	tokenRepository := memory.NewVirtualTokenRepository()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	metrics := obs.NewMetrics(prometheus.NewRegistry())
-	clock := memory.Clock{}
-
-	subscriptionService := subscription.NewService(subscriptionRepo, clock)
-	tokenService := token.NewService(tokenRepository, issuer.NewSimulatedCardIssuer(100_000), clock)
-	audit := memory.NewAuditLog()
-
-	apiServer := NewServer(
-		Config{APIKeys: []string{"test-key"}},
-		transactionRepository,
-		subscriptionService,
-		tokenService,
-		memory.NewDetectionOutbox(transactionRepository, metrics, logger, 16),
-		audit,
-		metrics,
-		logger,
-	)
+	fixture := newServerFixture()
+	apiServer, err := fixture.buildServer(t, Config{APIKeys: []string{"test-key"}})
+	if err != nil {
+		t.Fatalf("build server: %v", err)
+	}
 	testServer := httptest.NewServer(apiServer.http.Handler)
 	t.Cleanup(testServer.Close)
 
 	return &handlerTestFixture{
-		transactionRepository: transactionRepository,
-		subscriptionRepo:      subscriptionRepo,
-		tokenRepository:       tokenRepository,
-		audit:                 audit,
+		transactionRepository: fixture.transactions,
+		subscriptionRepo:      fixture.subscriptions,
+		tokenRepository:       fixture.tokens,
+		audit:                 fixture.audit,
 		server:                testServer,
 	}
 }
@@ -124,13 +102,28 @@ func TestIngestTransactionRejectsInvalidPayloads(t *testing.T) {
 	fixture := newHandlerTestFixture(t)
 
 	tests := map[string]func(map[string]any){
-		"negative amount":  func(request map[string]any) { request["amount_minor"] = -100 },
-		"zero amount":      func(request map[string]any) { request["amount_minor"] = 0 },
-		"empty user id":    func(request map[string]any) { request["user_id"] = "" },
-		"empty id":         func(request map[string]any) { request["id"] = "" },
-		"bad currency":     func(request map[string]any) { request["currency"] = "usd" },
-		"currency length":  func(request map[string]any) { request["currency"] = "USDT" },
-		"bad authorizedAt": func(request map[string]any) { request["authorized_at"] = "yesterday" },
+		"negative amount":    func(request map[string]any) { request["amount_minor"] = -100 },
+		"zero amount":        func(request map[string]any) { request["amount_minor"] = 0 },
+		"empty user id":      func(request map[string]any) { request["user_id"] = "" },
+		"empty id":           func(request map[string]any) { request["id"] = "" },
+		"bad currency":       func(request map[string]any) { request["currency"] = "usd" },
+		"currency length":    func(request map[string]any) { request["currency"] = "USDT" },
+		"bad authorizedAt":   func(request map[string]any) { request["authorized_at"] = "yesterday" },
+		"empty authorizedAt": func(request map[string]any) { request["authorized_at"] = "" },
+		"oversized id":       func(request map[string]any) { request["id"] = strings.Repeat("i", domain.MaxTransactionIDLength+1) },
+		"oversized user id":  func(request map[string]any) { request["user_id"] = strings.Repeat("u", domain.MaxUserIDLength+1) },
+		"oversized merchant id": func(request map[string]any) {
+			request["merchant_id"] = strings.Repeat("m", domain.MaxMerchantIDLength+1)
+		},
+		"oversized merchant": func(request map[string]any) {
+			request["merchant_name"] = strings.Repeat("n", domain.MaxMerchantNameLength+1)
+		},
+		"future authorizedAt": func(request map[string]any) {
+			request["authorized_at"] = time.Now().Add(48 * time.Hour).Format(time.RFC3339)
+		},
+		"ancient authorizedAt": func(request map[string]any) {
+			request["authorized_at"] = time.Now().Add(-3 * 365 * 24 * time.Hour).Format(time.RFC3339)
+		},
 	}
 
 	for name, mutate := range tests {
@@ -142,6 +135,19 @@ func TestIngestTransactionRejectsInvalidPayloads(t *testing.T) {
 				t.Fatalf("expected 400, got %d", response.StatusCode)
 			}
 		})
+	}
+}
+
+func TestIngestTransactionAcceptsBoundaryValues(t *testing.T) {
+	fixture := newHandlerTestFixture(t)
+
+	boundary := validIngestRequest("tx-boundary")
+	boundary["id"] = strings.Repeat("i", domain.MaxTransactionIDLength)
+	boundary["merchant_name"] = strings.Repeat("n", domain.MaxMerchantNameLength)
+	boundary["authorized_at"] = time.Now().Add(-domain.MaxTransactionAge).Add(time.Minute).Format(time.RFC3339)
+
+	if response := fixture.do(t, http.MethodPost, "/v1/transactions", boundary); response.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202 at validation boundary, got %d", response.StatusCode)
 	}
 }
 
@@ -228,11 +234,74 @@ func TestFreezeSubscriptionAlsoFreezesLinkedToken(t *testing.T) {
 	}
 
 	entries := fixture.audit.Entries()
-	if len(entries) != 1 || entries[0].Action != "freeze" || entries[0].EntityType != "subscription" || entries[0].EntityID != "sub-1" {
-		t.Errorf("expected freeze audit entry for sub-1, got %+v", entries)
+	if len(entries) != 2 {
+		t.Fatalf("expected audit entries for both entities, got %+v", entries)
 	}
-	if entries[0].Actor == "" {
-		t.Error("expected audit actor to be recorded")
+	for _, entry := range entries {
+		if entry.Action != "freeze" || entry.Actor == "" {
+			t.Errorf("unexpected audit entry: %+v", entry)
+		}
+	}
+	if entries[0].EntityType != "subscription" || entries[0].EntityID != "sub-1" {
+		t.Errorf("expected the subscription audit first, got %+v", entries[0])
+	}
+	if entries[1].EntityType != "token" || entries[1].EntityID != "vtok-1" {
+		t.Errorf("expected the linked token audit second, got %+v", entries[1])
+	}
+}
+
+func TestAuthorizeChargeRejectsInvalidPayloads(t *testing.T) {
+	fixture := newHandlerTestFixture(t)
+	virtualToken, err := domain.NewVirtualToken("vtok-1", "user-1", "netflix", "411111******1234", 10_000, "USD", time.Now())
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := fixture.tokenRepository.Save(t.Context(), virtualToken); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	tests := map[string]map[string]any{
+		"negative amount": {"amount_minor": -1, "currency": "USD"},
+		"zero amount":     {"amount_minor": 0, "currency": "USD"},
+		"bad currency":    {"amount_minor": 100, "currency": "usd"},
+		"empty currency":  {"amount_minor": 100, "currency": ""},
+	}
+
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			response := fixture.do(t, http.MethodPost, "/v1/tokens/vtok-1/authorize", payload)
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", response.StatusCode)
+			}
+			persisted, err := fixture.tokenRepository.GetByID(t.Context(), "vtok-1")
+			if err != nil {
+				t.Fatalf("load token: %v", err)
+			}
+			if persisted.SpentInPeriod != 0 {
+				t.Fatalf("expected spending unchanged, got %d", persisted.SpentInPeriod)
+			}
+		})
+	}
+}
+
+func TestAuthorizeChargeSpendsBudget(t *testing.T) {
+	fixture := newHandlerTestFixture(t)
+	virtualToken, err := domain.NewVirtualToken("vtok-1", "user-1", "netflix", "411111******1234", 10_000, "USD", time.Now())
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := fixture.tokenRepository.Save(t.Context(), virtualToken); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	response := fixture.do(t, http.MethodPost, "/v1/tokens/vtok-1/authorize", map[string]any{"amount_minor": 9_000, "currency": "USD"})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.StatusCode)
+	}
+
+	response = fixture.do(t, http.MethodPost, "/v1/tokens/vtok-1/authorize", map[string]any{"amount_minor": 2_000, "currency": "USD"})
+	if response.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("expected 402 over limit, got %d", response.StatusCode)
 	}
 }
 

@@ -4,38 +4,19 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/prometheus/client_golang/prometheus"
-
-	"subscriptionfirewall/internal/adapter/issuer"
-	"subscriptionfirewall/internal/adapter/memory"
-	"subscriptionfirewall/internal/obs"
-	"subscriptionfirewall/internal/subscription"
-	"subscriptionfirewall/internal/token"
 )
 
 func newSystemEndpointServer(t *testing.T, readiness func(ctx context.Context) error) *httptest.Server {
 	t.Helper()
 
-	transactionRepository := memory.NewTransactionRepository()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	metrics := obs.NewMetrics(prometheus.NewRegistry())
-
-	apiServer := NewServer(
-		Config{APIKeys: []string{"test-key"}, Readiness: readiness},
-		transactionRepository,
-		subscription.NewService(memory.NewSubscriptionRepository(), memory.Clock{}),
-		token.NewService(memory.NewVirtualTokenRepository(), issuer.NewSimulatedCardIssuer(100_000), memory.Clock{}),
-		memory.NewDetectionOutbox(transactionRepository, metrics, logger, 16),
-		memory.NewAuditLog(),
-		metrics,
-		logger,
-	)
+	apiServer, err := newServerFixture().buildServer(t, Config{APIKeys: []string{"test-key"}, Readiness: readiness})
+	if err != nil {
+		t.Fatalf("build server: %v", err)
+	}
 	testServer := httptest.NewServer(apiServer.http.Handler)
 	t.Cleanup(testServer.Close)
 	return testServer

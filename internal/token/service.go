@@ -2,24 +2,55 @@ package token
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 
 	"subscriptionfirewall/internal/domain"
 	"subscriptionfirewall/internal/ports"
 )
 
+const (
+	defaultIssuanceTimeout = 5 * time.Minute
+	issuanceKeyPrefix      = "issue"
+)
+
 type Service struct {
-	tokens     ports.VirtualTokenRepository
-	issuer     ports.VirtualCardIssuer
-	clock      ports.Clock
-	issueLocks keyedMutex
-	tokenLocks keyedMutex
+	tokens          ports.VirtualTokenRepository
+	issuer          ports.VirtualCardIssuer
+	clock           ports.Clock
+	logger          *slog.Logger
+	issuanceTimeout time.Duration
+	issueLocks      keyedMutex
 }
 
-func NewService(tokens ports.VirtualTokenRepository, issuer ports.VirtualCardIssuer, clock ports.Clock) *Service {
-	return &Service{tokens: tokens, issuer: issuer, clock: clock}
+type Options struct {
+	// IssuanceTimeout is how long an unfinished card reservation may block
+	// other attempts before it is considered abandoned. Zero selects the
+	// default.
+	IssuanceTimeout time.Duration
+	// Logger receives operational events about failed reservations. Nil falls
+	// back to the default logger.
+	Logger *slog.Logger
+}
+
+func NewService(tokens ports.VirtualTokenRepository, issuer ports.VirtualCardIssuer, clock ports.Clock, options Options) *Service {
+	issuanceTimeout := options.IssuanceTimeout
+	if issuanceTimeout <= 0 {
+		issuanceTimeout = defaultIssuanceTimeout
+	}
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{
+		tokens:          tokens,
+		issuer:          issuer,
+		clock:           clock,
+		logger:          logger,
+		issuanceTimeout: issuanceTimeout,
+	}
 }
 
 type keyedMutex struct {
@@ -59,42 +90,71 @@ func (s *Service) ListByUser(ctx context.Context, userID domain.UserID) ([]*doma
 	return tokens, nil
 }
 
+// EnsureToken returns the virtual card of the user and merchant pair, issuing
+// it on first use. Issuance is coordinated through a persisted reservation so
+// that concurrent attempts across replicas produce exactly one card at the
+// provider.
 func (s *Service) EnsureToken(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (*domain.VirtualToken, error) {
 	unlock := s.issueLocks.lock(string(userID) + "|" + string(merchantID))
 	defer unlock()
 
-	existing, err := s.tokens.FindByUserAndMerchant(ctx, userID, merchantID)
+	now := s.clock.Now()
+	reservation, err := s.tokens.ReserveTokenIssuance(
+		ctx, userID, merchantID,
+		issuanceKey(userID, merchantID),
+		now, now.Add(-s.issuanceTimeout),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reserve virtual card for merchant %s: %w", merchantID, err)
+	}
+	if !reservation.Reserved {
+		return resolvedReservation(reservation)
+	}
+
+	return s.issueReserved(ctx, reservation.TokenID, userID, merchantID)
+}
+
+func resolvedReservation(reservation ports.TokenReservation) (*domain.VirtualToken, error) {
 	switch {
-	case err == nil:
-		return existing, nil
-	case errors.Is(err, domain.ErrNotFound):
-		return s.issue(ctx, userID, merchantID)
+	case reservation.Existing == nil:
+		return nil, fmt.Errorf("virtual card reservation for %s returned no token: %w", reservation.TokenID, domain.ErrNotFound)
+	case reservation.Existing.State == domain.VirtualTokenIssuing:
+		return nil, fmt.Errorf("%w: token %s", ports.ErrIssuanceInProgress, reservation.TokenID)
 	default:
-		return nil, fmt.Errorf("find virtual token for merchant %s: %w", merchantID, err)
+		return reservation.Existing, nil
 	}
 }
 
-func (s *Service) issue(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (*domain.VirtualToken, error) {
-	issued, err := s.issuer.Issue(ctx, userID, merchantID)
+func (s *Service) issueReserved(
+	ctx context.Context,
+	tokenID domain.VirtualTokenID,
+	userID domain.UserID,
+	merchantID domain.MerchantID,
+) (*domain.VirtualToken, error) {
+	card, err := s.issuer.Issue(ctx, ports.IssueRequest{
+		UserID:         userID,
+		MerchantID:     merchantID,
+		IdempotencyKey: issuanceKey(userID, merchantID),
+	})
 	if err != nil {
+		s.releaseReservation(ctx, tokenID)
 		return nil, fmt.Errorf("issue virtual card for merchant %s: %w", merchantID, err)
 	}
-	token, err := domain.NewVirtualToken(
-		issued.TokenID,
-		userID,
-		merchantID,
-		issued.MaskedPAN,
-		issued.MonthlyLimit,
-		issued.Currency,
-		s.clock.Now(),
-	)
+
+	token, err := s.tokens.CompleteTokenIssuance(ctx, tokenID, issuanceKey(userID, merchantID), card, s.clock.Now())
 	if err != nil {
-		return nil, fmt.Errorf("initialize virtual token for merchant %s: %w", merchantID, err)
-	}
-	if err := s.tokens.Save(ctx, token); err != nil {
-		return nil, fmt.Errorf("persist virtual token %s: %w", token.ID, err)
+		return nil, fmt.Errorf("complete virtual card %s for merchant %s: %w", tokenID, merchantID, err)
 	}
 	return token, nil
+}
+
+func (s *Service) releaseReservation(ctx context.Context, tokenID domain.VirtualTokenID) {
+	if err := s.tokens.ReleaseTokenIssuance(ctx, tokenID); err != nil {
+		s.logger.Error("release virtual card reservation failed",
+			"virtual_token_id", string(tokenID),
+			"error", err,
+		)
+	}
 }
 
 func (s *Service) Freeze(ctx context.Context, id domain.VirtualTokenID) (*domain.VirtualToken, error) {
@@ -110,26 +170,14 @@ func (s *Service) Terminate(ctx context.Context, id domain.VirtualTokenID) (*dom
 }
 
 func (s *Service) Authorize(ctx context.Context, id domain.VirtualTokenID, amountMinor int64, currency string) (*domain.VirtualToken, error) {
-	unlock := s.tokenLocks.lock(string(id))
-	defer unlock()
-
-	token, err := s.tokens.GetByID(ctx, id)
+	token, err := s.tokens.Charge(ctx, id, amountMinor, currency, s.clock.Now())
 	if err != nil {
-		return nil, fmt.Errorf("load virtual token %s: %w", id, err)
-	}
-	if err := token.AuthorizeCharge(amountMinor, currency, s.clock.Now()); err != nil {
-		return nil, err
-	}
-	if err := s.tokens.Save(ctx, token); err != nil {
-		return nil, fmt.Errorf("persist virtual token %s: %w", id, err)
+		return nil, fmt.Errorf("charge virtual token %s: %w", id, err)
 	}
 	return token, nil
 }
 
 func (s *Service) mutate(ctx context.Context, id domain.VirtualTokenID, mutation func(*domain.VirtualToken) error) (*domain.VirtualToken, error) {
-	unlock := s.tokenLocks.lock(string(id))
-	defer unlock()
-
 	token, err := s.tokens.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("load virtual token %s: %w", id, err)
@@ -141,4 +189,8 @@ func (s *Service) mutate(ctx context.Context, id domain.VirtualTokenID, mutation
 		return nil, fmt.Errorf("persist virtual token %s: %w", id, err)
 	}
 	return token, nil
+}
+
+func issuanceKey(userID domain.UserID, merchantID domain.MerchantID) string {
+	return issuanceKeyPrefix + ":" + string(userID) + ":" + string(merchantID)
 }
