@@ -44,6 +44,16 @@ type MerchantChargeCount struct {
 	LastSeen    time.Time
 }
 
+// Page describes a bounded slice of a listing. Limit and offset are pushed
+// into the storage layer so a large collection is never materialized whole;
+// a non-positive limit means "no paging", which callers should avoid.
+type Page struct {
+	Limit  int
+	Offset int
+}
+
+func (p Page) IsUnbounded() bool { return p.Limit <= 0 }
+
 type SubscriptionRepository interface {
 	// Save inserts a new subscription or replaces an existing row addressed by
 	// id. It is intended for seeding and tests; concurrent use-case updates go
@@ -59,7 +69,8 @@ type SubscriptionRepository interface {
 	CreateIfAbsent(ctx context.Context, subscription *domain.Subscription) (*domain.Subscription, error)
 	GetByID(ctx context.Context, id domain.SubscriptionID) (*domain.Subscription, error)
 	FindByUserAndMerchant(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (*domain.Subscription, error)
-	ListByUser(ctx context.Context, userID domain.UserID) ([]*domain.Subscription, error)
+	// ListByUserPage returns one page of a user's subscriptions ordered by id.
+	ListByUserPage(ctx context.Context, userID domain.UserID, page Page) ([]*domain.Subscription, error)
 	// ListPendingZombieTransition returns subscriptions that are still
 	// active or trial and are already past their billing window, oldest due
 	// date first, capped at limit. The set is exactly the rows the sweep can
@@ -72,7 +83,8 @@ type VirtualTokenRepository interface {
 	Save(ctx context.Context, token *domain.VirtualToken) error
 	GetByID(ctx context.Context, id domain.VirtualTokenID) (*domain.VirtualToken, error)
 	FindByUserAndMerchant(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (*domain.VirtualToken, error)
-	ListByUser(ctx context.Context, userID domain.UserID) ([]*domain.VirtualToken, error)
+	// ListByUserPage returns one page of a user's virtual cards ordered by id.
+	ListByUserPage(ctx context.Context, userID domain.UserID, page Page) ([]*domain.VirtualToken, error)
 	// Charge debits amountMinor from the token monthly budget as a single
 	// atomic step. Implementations must serialize concurrent charges on the
 	// same token, so that the sum of approved charges never exceeds the limit

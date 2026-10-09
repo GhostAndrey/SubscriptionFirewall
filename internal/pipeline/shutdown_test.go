@@ -50,7 +50,7 @@ func TestStopDrainsQueuedUsers(t *testing.T) {
 	pipelineService.Start(context.Background(), 2)
 	pipelineService.Stop()
 
-	listed, err := subscriptions.ListByUser(context.Background(), userID)
+	listed, err := subscriptions.ListByUserPage(context.Background(), userID, ports.Page{})
 	if err != nil {
 		t.Fatalf("list subscriptions: %v", err)
 	}

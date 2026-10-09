@@ -9,6 +9,7 @@ import (
 
 	"subscriptionfirewall/internal/adapter/memory"
 	"subscriptionfirewall/internal/domain"
+	"subscriptionfirewall/internal/ports"
 )
 
 func TestSweepMarksOverdueSubscriptionZombie(t *testing.T) {
@@ -153,7 +154,7 @@ func TestListByUserDoesNotMutateState(t *testing.T) {
 		t.Fatalf("save subscription: %v", err)
 	}
 
-	if _, err := service.ListByUser(context.Background(), "user-1"); err != nil {
+	if _, err := service.ListByUser(context.Background(), "user-1", ports.Page{}); err != nil {
 		t.Fatalf("list: %v", err)
 	}
 

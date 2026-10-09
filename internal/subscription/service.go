@@ -34,8 +34,8 @@ func (s *Service) Get(ctx context.Context, id domain.SubscriptionID) (*domain.Su
 	return subscription, nil
 }
 
-func (s *Service) ListByUser(ctx context.Context, userID domain.UserID) ([]*domain.Subscription, error) {
-	subscriptions, err := s.subscriptions.ListByUser(ctx, userID)
+func (s *Service) ListByUser(ctx context.Context, userID domain.UserID, page ports.Page) ([]*domain.Subscription, error) {
+	subscriptions, err := s.subscriptions.ListByUserPage(ctx, userID, page)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions for user %s: %w", userID, err)
 	}

@@ -300,8 +300,14 @@ func (r *SubscriptionRepository) FindByUserAndMerchant(ctx context.Context, user
 	return subscription, nil
 }
 
-func (r *SubscriptionRepository) ListByUser(ctx context.Context, userID domain.UserID) ([]*domain.Subscription, error) {
-	return r.list(ctx, subscriptionSelect+` WHERE user_id = ? ORDER BY id`, userID)
+func (r *SubscriptionRepository) ListByUserPage(ctx context.Context, userID domain.UserID, page ports.Page) ([]*domain.Subscription, error) {
+	query := subscriptionSelect + ` WHERE user_id = ? ORDER BY id`
+	args := []any{userID}
+	if !page.IsUnbounded() {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, page.Limit, page.Offset)
+	}
+	return r.list(ctx, query, args...)
 }
 
 // ListPendingZombieTransition selects exactly the rows whose overdue check has
@@ -417,8 +423,15 @@ func (r *VirtualTokenRepository) FindByUserAndMerchant(ctx context.Context, user
 	return token, nil
 }
 
-func (r *VirtualTokenRepository) ListByUser(ctx context.Context, userID domain.UserID) ([]*domain.VirtualToken, error) {
-	rows, err := r.db.QueryContext(ctx, tokenSelect+` WHERE user_id = ? ORDER BY id`, userID)
+func (r *VirtualTokenRepository) ListByUserPage(ctx context.Context, userID domain.UserID, page ports.Page) ([]*domain.VirtualToken, error) {
+	query := tokenSelect + ` WHERE user_id = ? ORDER BY id`
+	args := []any{userID}
+	if !page.IsUnbounded() {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, page.Limit, page.Offset)
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list virtual tokens for user %s: %w", userID, err)
 	}

@@ -99,12 +99,21 @@ func (r *TransactionRepository) ListByUserAndMerchants(
 	merchants []domain.MerchantID,
 	since time.Time,
 ) ([]domain.Transaction, error) {
+	// An empty merchant set means "none", matching the SQL adapter. Treating
+	// it as "no filter" would silently pull a user's entire history.
+	if len(merchants) == 0 {
+		return nil, nil
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	return r.transactionsSinceLocked(userID, since, merchants), nil
 }
 
+// transactionsSinceLocked filters by user and time. A nil merchant set means
+// no merchant filter; callers that must narrow the set reject an empty one
+// before reaching here.
 func (r *TransactionRepository) transactionsSinceLocked(
 	userID domain.UserID,
 	since time.Time,
@@ -214,7 +223,7 @@ func (r *SubscriptionRepository) FindByUserAndMerchant(_ context.Context, userID
 	return nil, fmt.Errorf("subscription for user %s merchant %s: %w", userID, merchantID, domain.ErrNotFound)
 }
 
-func (r *SubscriptionRepository) ListByUser(_ context.Context, userID domain.UserID) ([]*domain.Subscription, error) {
+func (r *SubscriptionRepository) ListByUserPage(_ context.Context, userID domain.UserID, page ports.Page) ([]*domain.Subscription, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -225,7 +234,7 @@ func (r *SubscriptionRepository) ListByUser(_ context.Context, userID domain.Use
 		}
 	}
 	sortSubscriptionsByID(listed)
-	return listed, nil
+	return pageSlice(listed, page), nil
 }
 
 // ListPendingZombieTransition mirrors the MySQL adapter: only rows that can
@@ -313,7 +322,7 @@ func (r *VirtualTokenRepository) FindByUserAndMerchant(_ context.Context, userID
 	return nil, fmt.Errorf("virtual token for user %s merchant %s: %w", userID, merchantID, domain.ErrNotFound)
 }
 
-func (r *VirtualTokenRepository) ListByUser(_ context.Context, userID domain.UserID) ([]*domain.VirtualToken, error) {
+func (r *VirtualTokenRepository) ListByUserPage(_ context.Context, userID domain.UserID, page ports.Page) ([]*domain.VirtualToken, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -324,7 +333,19 @@ func (r *VirtualTokenRepository) ListByUser(_ context.Context, userID domain.Use
 		}
 	}
 	sort.Slice(listed, func(i, j int) bool { return listed[i].ID < listed[j].ID })
-	return listed, nil
+	return pageSlice(listed, page), nil
+}
+
+// pageSlice narrows a sorted listing to one page. Bounds are clamped so a page
+// request past the end yields an empty slice rather than panicking.
+func pageSlice[T any](items []T, page ports.Page) []T {
+	if page.IsUnbounded() {
+		return items
+	}
+	if page.Offset >= len(items) {
+		return []T{}
+	}
+	return items[page.Offset:min(page.Offset+page.Limit, len(items))]
 }
 
 func cloneToken(token *domain.VirtualToken) *domain.VirtualToken {

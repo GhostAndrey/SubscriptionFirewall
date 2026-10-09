@@ -136,6 +136,41 @@ func (r *countingRepository) ListByUserAndMerchants(
 	return r.TransactionRepository.ListByUserAndMerchants(ctx, userID, merchants, since)
 }
 
+// TestClassifyAgreesWithSweep pins the invariant that the detector's zombie
+// verdict and the sweep's overdue transition are the same rule expressed two
+// ways: MarkMissed compares now against NextExpectedAt = lastChargedAt+window,
+// which is algebraically identical to now-lastChargedAt > 2*window. If either
+// side changes, this test fails.
+func TestClassifyAgreesWithSweep(t *testing.T) {
+	windows := []domain.BillingWindow{domain.WindowWeekly, domain.WindowMonthly, domain.WindowYearly}
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	for _, window := range windows {
+		t.Run(string(window), func(t *testing.T) {
+			for step := range 400 {
+				lastChargedAt := now.Add(-time.Duration(step) * 6 * time.Hour)
+				subscription, err := domain.NewSubscription("sub-1", "user-1", "netflix", "Netflix",
+					domain.SubscriptionActive, window, 1500, "USD", lastChargedAt, 3)
+				if err != nil {
+					t.Fatalf("create: %v", err)
+				}
+				if err := subscription.MarkMissed(now); err != nil {
+					t.Fatalf("mark missed: %v", err)
+				}
+
+				detected := New(nil, frozenClock{now: now}, DefaultConfig()).classify(
+					lastChargedAt, lastChargedAt, domain.MCCDigitalGoodsSubscript, window, now)
+				swept := subscription.State == domain.SubscriptionZombie
+
+				if (detected == domain.SubscriptionZombie) != swept {
+					t.Fatalf("step %d (last charge %s ago): detector says %s, sweep says zombie=%v",
+						step, now.Sub(lastChargedAt), detected, swept)
+				}
+			}
+		})
+	}
+}
+
 func TestDetectIsolatesUsers(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	repository := memory.NewTransactionRepository()

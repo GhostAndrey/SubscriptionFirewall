@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"subscriptionfirewall/internal/domain"
+	"subscriptionfirewall/internal/ports"
 	"subscriptionfirewall/pkg/masking"
 )
 
@@ -78,14 +79,6 @@ func pageParams(r *http.Request) (limit, offset int, err error) {
 	return limit, offset, nil
 }
 
-func paginate[T any](items []T, limit, offset int) []T {
-	if offset >= len(items) {
-		return []T{}
-	}
-	end := min(offset+limit, len(items))
-	return items[offset:end]
-}
-
 func (s *Server) handleIngestTransaction(w http.ResponseWriter, r *http.Request) {
 	request, err := decodeJSON[ingestTransactionRequest](r)
 	if err != nil {
@@ -135,13 +128,13 @@ func (s *Server) handleListSubscriptions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	userID := domain.UserID(r.PathValue("user_id"))
-	subscriptions, err := s.subscriptions.ListByUser(r.Context(), userID)
+	subscriptions, err := s.subscriptions.ListByUser(r.Context(), userID, ports.Page{Limit: limit, Offset: offset})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	views := make([]subscriptionView, 0, len(subscriptions))
-	for _, subscription := range paginate(subscriptions, limit, offset) {
+	for _, subscription := range subscriptions {
 		views = append(views, toSubscriptionView(subscription))
 	}
 	writeJSON(w, http.StatusOK, views)
@@ -190,13 +183,13 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := domain.UserID(r.PathValue("user_id"))
-	tokens, err := s.tokens.ListByUser(r.Context(), userID)
+	tokens, err := s.tokens.ListByUser(r.Context(), userID, ports.Page{Limit: limit, Offset: offset})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	views := make([]tokenView, 0, len(tokens))
-	for _, token := range paginate(tokens, limit, offset) {
+	for _, token := range tokens {
 		views = append(views, toTokenView(token))
 	}
 	writeJSON(w, http.StatusOK, views)

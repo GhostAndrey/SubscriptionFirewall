@@ -82,8 +82,8 @@ func (s *Service) Get(ctx context.Context, id domain.VirtualTokenID) (*domain.Vi
 	return token, nil
 }
 
-func (s *Service) ListByUser(ctx context.Context, userID domain.UserID) ([]*domain.VirtualToken, error) {
-	tokens, err := s.tokens.ListByUser(ctx, userID)
+func (s *Service) ListByUser(ctx context.Context, userID domain.UserID, page ports.Page) ([]*domain.VirtualToken, error) {
+	tokens, err := s.tokens.ListByUserPage(ctx, userID, page)
 	if err != nil {
 		return nil, fmt.Errorf("list virtual tokens for user %s: %w", userID, err)
 	}

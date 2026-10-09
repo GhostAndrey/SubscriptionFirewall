@@ -224,7 +224,7 @@ func TestEnsureTokenReleasesReservationWhenIssuerFails(t *testing.T) {
 		t.Fatal("expected issuance failure")
 	}
 
-	listed, err := repository.ListByUser(context.Background(), "user-1")
+	listed, err := repository.ListByUserPage(context.Background(), "user-1", ports.Page{})
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
