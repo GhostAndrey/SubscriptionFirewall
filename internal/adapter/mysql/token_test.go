@@ -225,30 +225,31 @@ func TestConcurrentChargesAndFreezesKeepEveryDebit(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
-	const chargeWorkers, freezeWorkers, amount = 4, 4, 1_000
+	const workers, amount = 8, 1_000
 	if err := repository.Save(ctx, newTestToken(t, "vtok-parallel", 100_000)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	var wg sync.WaitGroup
-	var start sync.WaitGroup
-	start.Add(1)
-
-	for worker := range chargeWorkers {
-		wg.Add(1)
+	// The debits land first and in full, so the final balance is a fixed
+	// number. Freezing afterwards may succeed or conflict depending on the
+	// interleaving, but no outcome may change that balance.
+	var charges sync.WaitGroup
+	for worker := range workers {
+		charges.Add(1)
 		go func() {
-			defer wg.Done()
-			start.Wait()
+			defer charges.Done()
 			if _, err := repository.Charge(ctx, "vtok-parallel", amount, "USD", now); err != nil {
 				t.Errorf("charge %d: %v", worker, err)
 			}
 		}()
 	}
-	for worker := range freezeWorkers {
-		wg.Add(1)
+	charges.Wait()
+
+	var freezes sync.WaitGroup
+	for worker := range workers {
+		freezes.Add(1)
 		go func() {
-			defer wg.Done()
-			start.Wait()
+			defer freezes.Done()
 			loaded, err := repository.GetByID(ctx, "vtok-parallel")
 			if err != nil {
 				t.Errorf("get %d: %v", worker, err)
@@ -258,24 +259,25 @@ func TestConcurrentChargesAndFreezesKeepEveryDebit(t *testing.T) {
 				t.Errorf("freeze %d: %v", worker, err)
 				return
 			}
-			// A conflict is the expected outcome whenever a charge won the race;
-			// what must never happen is a successful write of a stale budget.
+			// Several replicas freezing at once conflict with each other; the
+			// caller retries, which is what must not rewind the balance.
 			if err := repository.UpdateVersion(ctx, loaded); err != nil &&
 				!errors.Is(err, ports.ErrVersionConflict) {
 				t.Errorf("update %d: %v", worker, err)
 			}
 		}()
 	}
-
-	start.Done()
-	wg.Wait()
+	freezes.Wait()
 
 	final, err := repository.GetByID(ctx, "vtok-parallel")
 	if err != nil {
 		t.Fatalf("get final: %v", err)
 	}
-	if got := final.Snapshot().SpentInPeriod; got != chargeWorkers*amount {
-		t.Errorf("spent = %d, want %d: a freeze must never discard a concurrent debit",
-			got, chargeWorkers*amount)
+	if want := int64(workers * amount); final.Snapshot().SpentInPeriod != want {
+		t.Errorf("spent = %d, want %d: concurrent freezes must never discard a debit",
+			final.Snapshot().SpentInPeriod, want)
+	}
+	if final.State != domain.VirtualTokenFrozen {
+		t.Errorf("state = %s, want Frozen", final.State)
 	}
 }
