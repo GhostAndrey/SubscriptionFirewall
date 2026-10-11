@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"subscriptionfirewall/internal/lifecycle"
@@ -35,6 +36,7 @@ type subscriptionSweeper struct {
 	stopped chan struct{}
 	done    chan struct{}
 	once    sync.Once
+	started atomic.Bool
 }
 
 func newSubscriptionSweeper(
@@ -58,11 +60,19 @@ func newSubscriptionSweeper(
 }
 
 func (s *subscriptionSweeper) start(ctx context.Context) {
+	if !s.started.CompareAndSwap(false, true) {
+		return
+	}
 	go s.loop(ctx)
 }
 
+// stop waits for the pass in flight to finish. A sweeper that was never started
+// has nothing to wait for, so shutdown must not block on it.
 func (s *subscriptionSweeper) stop() {
 	s.once.Do(func() { close(s.stopped) })
+	if !s.started.Load() {
+		return
+	}
 	<-s.done
 }
 

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -53,7 +54,7 @@ func New(
 		logger:        logger,
 	}
 	p.runner = worker.New(worker.Options[ports.OutboxItem]{
-		Claim:               outbox.ClaimBatch,
+		Claim:               p.claimUntilOpen,
 		Complete:            outbox.Complete,
 		Process:             p.processItem,
 		Maintenance:         p.maintain,
@@ -62,6 +63,18 @@ func New(
 		Logger:              logger,
 	})
 	return p
+}
+
+// claimUntilOpen translates the adapter's closed-queue sentinel into a
+// cancelled context, which is what the shared worker treats as terminal. Without
+// it a shutting-down pipeline logs the closure as a claim failure and burns a
+// retry cycle before noticing the cancellation.
+func (p *Pipeline) claimUntilOpen(ctx context.Context, limit int) ([]ports.OutboxItem, error) {
+	items, err := p.outbox.ClaimBatch(ctx, limit)
+	if errors.Is(err, ports.ErrOutboxClosed) {
+		return items, context.Canceled
+	}
+	return items, err
 }
 
 func (p *Pipeline) Start(ctx context.Context, workerCount int) {
