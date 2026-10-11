@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -118,16 +119,14 @@ func (q *LifecycleSyncQueue) PendingCount(context.Context) (int64, error) {
 	return pending, nil
 }
 
+// idsInOrder lists task ids oldest first, which is the order claims are
+// handed out in so a backlog is replayed in the sequence it was created.
 func (q *LifecycleSyncQueue) idsInOrder() []int64 {
 	ids := make([]int64, 0, len(q.tasks))
 	for id := range q.tasks {
 		ids = append(ids, id)
 	}
-	for i := 1; i < len(ids); i++ {
-		for j := i; j > 0 && ids[j] < ids[j-1]; j-- {
-			ids[j], ids[j-1] = ids[j-1], ids[j]
-		}
-	}
+	slices.Sort(ids)
 	return ids
 }
 

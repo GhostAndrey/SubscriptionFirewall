@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -19,17 +17,16 @@ import (
 	"subscriptionfirewall/internal/ports"
 	"subscriptionfirewall/internal/subscription"
 	"subscriptionfirewall/internal/token"
+	"subscriptionfirewall/internal/worker"
 )
 
-const (
-	claimBatchSize      = 16
-	claimRetryDelay     = time.Second
-	maintenanceInterval = time.Minute
-	staleItemAfter      = 5 * time.Minute
-)
+const staleItemAfter = 5 * time.Minute
 
 var tracer = otel.Tracer("subscriptionfirewall/pipeline")
 
+// Pipeline turns ingested transactions into detected subscriptions: it claims
+// queued users, runs the detector and provisions the virtual cards behind each
+// detection.
 type Pipeline struct {
 	outbox        ports.DetectionOutbox
 	detector      *detector.Detector
@@ -37,10 +34,7 @@ type Pipeline struct {
 	tokens        *token.Service
 	metrics       *obs.Metrics
 	logger        *slog.Logger
-
-	workers sync.WaitGroup
-	cancel  context.CancelFunc
-	stopped atomic.Bool
+	runner        *worker.Runner[ports.OutboxItem]
 }
 
 func New(
@@ -51,7 +45,7 @@ func New(
 	metrics *obs.Metrics,
 	logger *slog.Logger,
 ) *Pipeline {
-	return &Pipeline{
+	p := &Pipeline{
 		outbox:        outbox,
 		detector:      detectorService,
 		subscriptions: subscriptions,
@@ -59,60 +53,41 @@ func New(
 		metrics:       metrics,
 		logger:        logger,
 	}
+	p.runner = worker.New(worker.Options[ports.OutboxItem]{
+		Claim:               p.claimUntilOpen,
+		Complete:            outbox.Complete,
+		Process:             p.processItem,
+		Maintenance:         p.maintain,
+		MaintenanceInterval: time.Minute,
+		Name:                "detection pipeline",
+		Logger:              logger,
+	})
+	return p
+}
+
+// claimUntilOpen translates the adapter's closed-queue sentinel into a
+// cancelled context, which is what the shared worker treats as terminal. Without
+// it a shutting-down pipeline logs the closure as a claim failure and burns a
+// retry cycle before noticing the cancellation.
+func (p *Pipeline) claimUntilOpen(ctx context.Context, limit int) ([]ports.OutboxItem, error) {
+	items, err := p.outbox.ClaimBatch(ctx, limit)
+	if errors.Is(err, ports.ErrOutboxClosed) {
+		return items, context.Canceled
+	}
+	return items, err
 }
 
 func (p *Pipeline) Start(ctx context.Context, workerCount int) {
-	workerContext, cancel := context.WithCancel(ctx)
-	p.cancel = cancel
-
-	for range workerCount {
-		p.workers.Add(1)
-		go p.workerLoop(workerContext)
-	}
-	p.workers.Add(1)
-	go p.maintenanceLoop(workerContext)
-
-	p.logger.Info("detection pipeline started", "workers", workerCount)
+	p.runner.Start(ctx, workerCount)
 }
 
+// Stop closes the in-memory outbox first, which unblocks workers parked on the
+// queue, then drains the runners before returning.
 func (p *Pipeline) Stop() {
-	if p.stopped.CompareAndSwap(false, true) {
-		if closer, ok := p.outbox.(interface{ Close() }); ok {
-			closer.Close()
-		}
-		if p.cancel != nil {
-			p.cancel()
-		}
+	if closer, ok := p.outbox.(interface{ Close() }); ok {
+		closer.Close()
 	}
-	p.workers.Wait()
-	p.logger.Info("detection pipeline stopped")
-}
-
-func (p *Pipeline) workerLoop(ctx context.Context) {
-	defer p.workers.Done()
-	for {
-		items, err := p.outbox.ClaimBatch(ctx, claimBatchSize)
-
-		for _, item := range items {
-			p.processItem(ctx, item)
-		}
-		switch {
-		case errors.Is(err, ports.ErrOutboxClosed), errors.Is(err, context.Canceled):
-			return
-		case err != nil:
-			p.logger.Error("claim detection jobs failed", "error", err)
-			if !sleepContext(ctx, claimRetryDelay) {
-				return
-			}
-			continue
-		}
-		if len(items) == 0 {
-
-			if !sleepContext(ctx, claimRetryDelay) {
-				return
-			}
-		}
-	}
+	p.runner.Stop()
 }
 
 func (p *Pipeline) processItem(ctx context.Context, item ports.OutboxItem) {
@@ -183,37 +158,14 @@ func (p *Pipeline) applyDetection(ctx context.Context, detected domain.DetectedS
 	return nil
 }
 
-func (p *Pipeline) maintenanceLoop(ctx context.Context) {
-	defer p.workers.Done()
-	ticker := time.NewTicker(maintenanceInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		requeued, err := p.outbox.RequeueStale(ctx, staleItemAfter)
-		if err != nil {
-			p.logger.Error("requeue stale detection jobs failed", "error", err)
-		} else if requeued > 0 {
-			p.logger.Warn("requeued stale detection jobs", "count", requeued)
-		}
-		if pending, err := p.outbox.PendingCount(ctx); err == nil {
-			p.metrics.SetQueueDepth(int(pending))
-		}
+func (p *Pipeline) maintain(ctx context.Context) {
+	requeued, err := p.outbox.RequeueStale(ctx, staleItemAfter)
+	if err != nil {
+		p.logger.Error("requeue stale detection jobs failed", "error", err)
+	} else if requeued > 0 {
+		p.logger.Warn("requeued stale detection jobs", "count", requeued)
 	}
-}
-
-func sleepContext(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
+	if pending, err := p.outbox.PendingCount(ctx); err == nil {
+		p.metrics.SetQueueDepth(int(pending))
 	}
 }

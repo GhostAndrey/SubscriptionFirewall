@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -136,16 +137,10 @@ func (r *TransactionRepository) transactionsSinceLocked(
 		}
 		filtered = append(filtered, transaction)
 	}
-	sortTransactionsByTime(filtered)
+	slices.SortFunc(filtered, func(a, b domain.Transaction) int {
+		return a.AuthorizedAt.Compare(b.AuthorizedAt)
+	})
 	return filtered
-}
-
-func sortTransactionsByTime(transactions []domain.Transaction) {
-	for i := 1; i < len(transactions); i++ {
-		for j := i; j > 0 && transactions[j].AuthorizedAt.Before(transactions[j-1].AuthorizedAt); j-- {
-			transactions[j], transactions[j-1] = transactions[j-1], transactions[j]
-		}
-	}
 }
 
 type SubscriptionRepository struct {
@@ -299,6 +294,29 @@ func (r *VirtualTokenRepository) Save(_ context.Context, token *domain.VirtualTo
 	return nil
 }
 
+// UpdateVersion reproduces the optimistic concurrency guarantee of the MySQL
+// adapter so that tests exercising the memory storage observe the same
+// conflicts as production.
+func (r *VirtualTokenRepository) UpdateVersion(_ context.Context, token *domain.VirtualToken) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	stored, ok := r.tokens[token.ID]
+	if !ok {
+		return fmt.Errorf("virtual token %s: %w", token.ID, domain.ErrNotFound)
+	}
+	if stored.CurrentVersion() != token.CurrentVersion() {
+		return fmt.Errorf("virtual token %s at version %d: %w",
+			token.ID, token.CurrentVersion(), ports.ErrVersionConflict)
+	}
+	nextVersion := stored.CurrentVersion() + 1
+	persisted := cloneToken(token)
+	persisted.AdmitVersion(nextVersion)
+	r.tokens[token.ID] = persisted
+	token.AdmitVersion(nextVersion)
+	return nil
+}
+
 func (r *VirtualTokenRepository) GetByID(_ context.Context, id domain.VirtualTokenID) (*domain.VirtualToken, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -360,6 +378,7 @@ func cloneToken(token *domain.VirtualToken) *domain.VirtualToken {
 		Currency:      snapshot.Currency,
 		State:         snapshot.State,
 		PeriodStarted: snapshot.PeriodStarted,
+		Version:       snapshot.Version,
 	}
 }
 
@@ -383,6 +402,9 @@ func (r *VirtualTokenRepository) Charge(
 	if err := token.ApplyCharge(amountMinor, currency, now); err != nil {
 		return nil, err
 	}
+	// Charge bumps the version so a lifecycle transition that read the token
+	// before this debit is rejected instead of writing a stale budget back.
+	token.AdmitVersion(token.CurrentVersion() + 1)
 	r.tokens[id] = token
 	return cloneToken(token), nil
 }
@@ -428,6 +450,7 @@ func (r *VirtualTokenRepository) CompleteTokenIssuance(
 	if err := token.CompleteIssuance(card.MaskedPAN, card.MonthlyLimit, card.Currency, now); err != nil {
 		return nil, err
 	}
+	token.AdmitVersion(token.CurrentVersion() + 1)
 	r.tokens[tokenID] = token
 	return cloneToken(token), nil
 }

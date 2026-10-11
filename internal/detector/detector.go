@@ -3,6 +3,7 @@ package detector
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -90,7 +91,8 @@ func (d *Detector) minimumRequiredOccurrences() int {
 }
 
 func (d *Detector) detectRecurring(userID domain.UserID, merchantID domain.MerchantID, merchantTransactions []domain.Transaction) (domain.DetectedSubscription, bool) {
-	if len(merchantTransactions) < d.requiredOccurrences(merchantTransactions[0].MCC) {
+	last := merchantTransactions[len(merchantTransactions)-1]
+	if len(merchantTransactions) < d.requiredOccurrences(last.MCC) {
 		return domain.DetectedSubscription{}, false
 	}
 	if !sharesSingleCurrency(merchantTransactions) {
@@ -109,7 +111,6 @@ func (d *Detector) detectRecurring(userID domain.UserID, merchantID domain.Merch
 		return domain.DetectedSubscription{}, false
 	}
 
-	last := merchantTransactions[len(merchantTransactions)-1]
 	first := merchantTransactions[0]
 	now := d.clock.Now()
 
@@ -145,10 +146,18 @@ func (d *Detector) requiredOccurrences(mcc domain.MCC) int {
 	return d.config.MinimumOccurrences
 }
 
+// groupByMerchant buckets a user's transactions per merchant. Each bucket is
+// sorted by authorization time, because the interval and window rules read the
+// first and last charge of the bucket as its boundaries.
 func groupByMerchant(transactions []domain.Transaction) map[domain.MerchantID][]domain.Transaction {
 	grouped := make(map[domain.MerchantID][]domain.Transaction)
 	for _, transaction := range transactions {
 		grouped[transaction.MerchantID] = append(grouped[transaction.MerchantID], transaction)
+	}
+	for _, merchantTransactions := range grouped {
+		slices.SortFunc(merchantTransactions, func(a, b domain.Transaction) int {
+			return a.AuthorizedAt.Compare(b.AuthorizedAt)
+		})
 	}
 	return grouped
 }

@@ -109,63 +109,54 @@ func (s *Service) TerminateToken(ctx context.Context, actor string, id domain.Vi
 }
 
 func (s *Service) ChangeSubscription(ctx context.Context, actor string, id domain.SubscriptionID, action Action) (*domain.Subscription, error) {
-	if !action.isValid() {
-		return nil, fmt.Errorf("unknown lifecycle action %q: %w", action, domain.ErrInvalidTransition)
+	if err := validateAction(action); err != nil {
+		return nil, err
 	}
 
 	changed, err := s.applySubscription(ctx, id, action)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.record(ctx, actor, action, entitySubscription, string(id)); err != nil {
-		s.logger.Warn("audit record failed", "action", action, "entity_type", entitySubscription, "entity_id", string(id), "error", err)
-	}
+	s.writeAudit(ctx, actor, action, entitySubscription, string(id))
 
 	if changed.VirtualTokenID == "" {
 		s.count(action, entitySubscription, "applied")
 		return changed, nil
 	}
 	tokenID := domain.VirtualTokenID(changed.VirtualTokenID)
-
 	if _, err := s.applyToken(ctx, tokenID, action); err != nil {
-		return changed, s.handleCounterpartFailure(ctx, entitySubscription, changed, entityToken, string(tokenID), action, err)
+		return changed, s.handleCounterpartFailure(ctx, changeOf(changed), entityToken, string(tokenID), action, err)
 	}
-	if err := s.record(ctx, actor, action, entityToken, string(tokenID)); err != nil {
-		s.logger.Warn("audit record failed", "action", action, "entity_type", entityToken, "entity_id", string(tokenID), "error", err)
-	}
+	s.writeAudit(ctx, actor, action, entityToken, string(tokenID))
 	s.count(action, entityToken, "applied")
 	s.count(action, entitySubscription, "applied")
 	return changed, nil
 }
 
 func (s *Service) ChangeToken(ctx context.Context, actor string, id domain.VirtualTokenID, action Action) (*domain.VirtualToken, error) {
-	if !action.isValid() {
-		return nil, fmt.Errorf("unknown lifecycle action %q: %w", action, domain.ErrInvalidTransition)
+	if err := validateAction(action); err != nil {
+		return nil, err
 	}
 
 	changed, err := s.applyToken(ctx, id, action)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.record(ctx, actor, action, entityToken, string(id)); err != nil {
-		s.logger.Warn("audit record failed", "action", action, "entity_type", entityToken, "entity_id", string(id), "error", err)
-	}
+	s.writeAudit(ctx, actor, action, entityToken, string(id))
 
 	linked, err := s.subscriptions.GetByUserAndMerchant(ctx, changed.UserID, changed.MerchantID)
-	if errors.Is(err, domain.ErrNotFound) {
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
 		s.count(action, entityToken, "applied")
 		return changed, nil
-	}
-	if err != nil {
-		return changed, s.handleCounterpartFailure(ctx, entityToken, changed, entitySubscription, string(linked.ID), action, err)
+	case err != nil:
+		return changed, s.handleCounterpartFailure(ctx, changeOfToken(changed), entitySubscription, "", action, err)
 	}
 
 	if _, err := s.applySubscription(ctx, linked.ID, action); err != nil {
-		return changed, s.handleCounterpartFailure(ctx, entityToken, changed, entitySubscription, string(linked.ID), action, err)
+		return changed, s.handleCounterpartFailure(ctx, changeOfToken(changed), entitySubscription, string(linked.ID), action, err)
 	}
-	if err := s.record(ctx, actor, action, entitySubscription, string(linked.ID)); err != nil {
-		s.logger.Warn("audit record failed", "action", action, "entity_type", entitySubscription, "entity_id", string(linked.ID), "error", err)
-	}
+	s.writeAudit(ctx, actor, action, entitySubscription, string(linked.ID))
 	s.count(action, entitySubscription, "applied")
 	s.count(action, entityToken, "applied")
 	return changed, nil
@@ -192,14 +183,61 @@ func (s *Service) SyncZombie(ctx context.Context, subscription *domain.Subscript
 		return s.deferCounterpart(ctx, ActionFreeze, entityToken, string(tokenID), err)
 	}
 
-	if err := s.record(ctx, actorSystem, ActionFreeze, entityToken, string(tokenID)); err != nil {
-		s.logger.Warn("audit record failed", "action", ActionFreeze, "entity_type", entityToken, "entity_id", string(tokenID), "error", err)
-	}
+	s.writeAudit(ctx, actorSystem, ActionFreeze, entityToken, string(tokenID))
 	s.count(ActionFreeze, entityToken, "applied")
 	return nil
 }
 
 const actorSystem = "system"
+
+func validateAction(action Action) error {
+	if !action.isValid() {
+		return fmt.Errorf("unknown lifecycle action %q: %w", action, domain.ErrInvalidTransition)
+	}
+	return nil
+}
+
+// audit records an entry, downgrading a storage failure to a warning: losing
+// the audit trail must not undo a transition that already reached both
+// entities.
+func (s *Service) writeAudit(ctx context.Context, actor string, action Action, entityType, entityID string) {
+	if err := s.record(ctx, actor, action, entityType, entityID); err != nil {
+		s.logger.Warn("audit record failed",
+			"action", action, "entity_type", entityType, "entity_id", entityID, "error", err)
+	}
+}
+
+// changeable is the pair of operations a lifecycle action needs on either
+// entity type. It lets the rollback path stay generic without inspecting
+// concrete types.
+type changeable interface {
+	entityType() string
+	entityID() string
+	apply(ctx context.Context, s *Service, action Action) error
+}
+
+func changeOf(subscription *domain.Subscription) changeable {
+	return subscriptionChange{subscription.ID}
+}
+func changeOfToken(token *domain.VirtualToken) changeable { return tokenChange{token.ID} }
+
+type subscriptionChange struct{ id domain.SubscriptionID }
+
+func (subscriptionChange) entityType() string { return entitySubscription }
+func (c subscriptionChange) entityID() string { return string(c.id) }
+func (c subscriptionChange) apply(ctx context.Context, s *Service, action Action) error {
+	_, err := s.applySubscription(ctx, c.id, action)
+	return err
+}
+
+type tokenChange struct{ id domain.VirtualTokenID }
+
+func (tokenChange) entityType() string { return entityToken }
+func (c tokenChange) entityID() string { return string(c.id) }
+func (c tokenChange) apply(ctx context.Context, s *Service, action Action) error {
+	_, err := s.applyToken(ctx, c.id, action)
+	return err
+}
 
 // handleCounterpartFailure either compensates the change already applied or,
 // when the action cannot be undone, defers the counterpart to the sync queue.
@@ -207,23 +245,22 @@ const actorSystem = "system"
 // transition for a completed one.
 func (s *Service) handleCounterpartFailure(
 	ctx context.Context,
-	originEntity string,
-	origin any,
+	origin changeable,
 	targetEntity string,
 	counterpartID string,
 	action Action,
 	cause error,
 ) error {
 	s.countLinkedFailure(targetEntity, string(action))
-	s.count(action, originEntity, "partial")
+	s.count(action, origin.entityType(), "partial")
 
-	if _, reversible := action.compensate(); reversible {
-		if err := s.compensate(ctx, action, origin); err != nil {
+	if inverse, reversible := action.compensate(); reversible {
+		if err := origin.apply(ctx, s, inverse); err != nil {
 			s.logger.Error("compensating lifecycle action failed",
-				"action", string(action), "entity_type", originEntity, "error", err)
+				"action", string(action), "entity_type", origin.entityType(), "error", err)
 			return errors.Join(cause, err)
 		}
-		s.count(action, originEntity, "compensated")
+		s.count(action, origin.entityType(), "compensated")
 		return fmt.Errorf("counterpart %s %s not applied, change rolled back: %w", targetEntity, counterpartID, cause)
 	}
 	return s.deferCounterpart(ctx, action, targetEntity, counterpartID, cause)
@@ -251,25 +288,6 @@ func (s *Service) deferCounterpart(ctx context.Context, action Action, targetEnt
 		"entity_id", task.EntityID, "error", cause,
 	)
 	return fmt.Errorf("%w: %s %s: %w", ErrSyncDeferred, targetEntity, task.EntityID, cause)
-}
-
-// compensate undoes a reversible action on the entity it was already applied
-// to, so that a failed counterpart update never leaves a half-applied pair.
-func (s *Service) compensate(ctx context.Context, action Action, origin any) error {
-	inverse, ok := action.compensate()
-	if !ok {
-		return nil
-	}
-	switch value := origin.(type) {
-	case *domain.Subscription:
-		_, err := s.applySubscription(ctx, value.ID, inverse)
-		return err
-	case *domain.VirtualToken:
-		_, err := s.applyToken(ctx, value.ID, inverse)
-		return err
-	default:
-		return fmt.Errorf("cannot compensate entity of type %T", origin)
-	}
 }
 
 // ReplayTask applies a task that was deferred earlier. It is idempotent: an

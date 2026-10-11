@@ -63,25 +63,34 @@ func (s *Service) Sweep(ctx context.Context, batchSize int) ([]*domain.Subscript
 	for {
 		pending, err := s.subscriptions.ListPendingZombieTransition(ctx, now, batchSize)
 		if err != nil {
-			return nil, fmt.Errorf("list subscriptions pending zombie transition: %w", err)
+			return changed, fmt.Errorf("list subscriptions pending zombie transition: %w", err)
 		}
 		if len(pending) == 0 {
 			return changed, nil
 		}
 
+		progressed := false
 		for _, subscription := range pending {
 			before := subscription.State
 			if err := s.markMissed(ctx, subscription, now); err != nil {
 				if errors.Is(err, ports.ErrVersionConflict) {
 					continue
 				}
-				return nil, err
+				return changed, err
 			}
 			if subscription.State != before {
 				changed = append(changed, subscription)
+				progressed = true
 			}
 		}
 
+		// Rows that were not marked missed stay pending by construction, so
+		// re-reading them would spin forever. Without progress the batch held
+		// only rows another replica is contending over, and the next pass can
+		// pick them up.
+		if !progressed {
+			return changed, nil
+		}
 		if err := ctx.Err(); err != nil {
 			return changed, err
 		}

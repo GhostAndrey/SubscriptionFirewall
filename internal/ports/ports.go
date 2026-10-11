@@ -17,6 +17,9 @@ var (
 	// card issuance reservation for the same user and merchant. The caller
 	// should retry rather than treat it as a failure.
 	ErrIssuanceInProgress = errors.New("virtual card issuance already in progress")
+	// ErrIssuanceLost reports that the issuance reservation was taken over by
+	// another replica before the card could be completed.
+	ErrIssuanceLost = errors.New("virtual card issuance reservation lost")
 )
 
 type Clock interface {
@@ -80,7 +83,15 @@ type SubscriptionRepository interface {
 }
 
 type VirtualTokenRepository interface {
+	// Save inserts a new token or replaces an existing row addressed by id. It
+	// is intended for seeding and tests; concurrent use-case updates go
+	// through UpdateVersion.
 	Save(ctx context.Context, token *domain.VirtualToken) error
+	// UpdateVersion persists a token only if nobody else has changed it since
+	// it was read, and bumps Version on success. It returns
+	// ErrVersionConflict when the caller must re-read and retry, so a
+	// lifecycle transition can never discard a charge that landed in between.
+	UpdateVersion(ctx context.Context, token *domain.VirtualToken) error
 	GetByID(ctx context.Context, id domain.VirtualTokenID) (*domain.VirtualToken, error)
 	FindByUserAndMerchant(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (*domain.VirtualToken, error)
 	// ListByUserPage returns one page of a user's virtual cards ordered by id.
