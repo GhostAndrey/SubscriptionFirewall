@@ -161,16 +161,16 @@ func (r *SubscriptionRepository) list(ctx context.Context, query string, args ..
 	return subscriptions, nil
 }
 
-const subscriptionColumns = `(id, user_id, merchant_id, merchant_name, virtual_token_id, state,
-	billing_window, average_amount, currency, last_charged_at, next_expected_at, observed_payments, version)`
+const subscriptionColumns = `id, user_id, merchant_id, merchant_name, virtual_token_id, state,
+	billing_window, average_amount, currency, last_charged_at, next_expected_at, observed_payments, version`
 
 const subscriptionSelect = `SELECT ` + subscriptionColumns + ` FROM subscriptions`
 
-const subscriptionInsert = `INSERT INTO subscriptions ` + subscriptionColumns + `
+const subscriptionInsert = `INSERT INTO subscriptions (` + subscriptionColumns + `)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON DUPLICATE KEY UPDATE id = id`
 
-const subscriptionUpsert = `INSERT INTO subscriptions ` + subscriptionColumns + `
+const subscriptionUpsert = `INSERT INTO subscriptions (` + subscriptionColumns + `)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON DUPLICATE KEY UPDATE
 		merchant_name = VALUES(merchant_name), virtual_token_id = VALUES(virtual_token_id),

@@ -25,11 +25,11 @@ func NewVirtualTokenRepository(db *sql.DB) *VirtualTokenRepository {
 // UpdateVersion.
 func (r *VirtualTokenRepository) Save(ctx context.Context, token *domain.VirtualToken) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO virtual_tokens `+tokenColumns+`
+		`INSERT INTO virtual_tokens (`+tokenColumns+`)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE
-			masked_pan = VALUES(masked_pan), state = VALUES(state), spent_in_period = VALUES(spent_in_period),
-			monthly_limit = VALUES(monthly_limit), currency = VALUES(currency), period_started = VALUES(period_started)`,
+			state = VALUES(state), spent_in_period = VALUES(spent_in_period),
+			monthly_limit = VALUES(monthly_limit), period_started = VALUES(period_started)`,
 		tokenArgs(token)...,
 	)
 	if err != nil {
@@ -183,7 +183,7 @@ func (r *VirtualTokenRepository) ReserveTokenIssuance(
 
 	reservedToken := domain.NewIssuingVirtualToken(domain.VirtualTokenID(identifier.New("vtok")), userID, merchantID, now)
 	result, err := tx.ExecContext(ctx,
-		`INSERT INTO virtual_tokens `+tokenColumns+`
+		`INSERT INTO virtual_tokens (`+tokenColumns+`)
 		 VALUES (?, ?, ?, '', 0, 0, '', ?, ?, ?, 0)
 		 ON DUPLICATE KEY UPDATE id = id`,
 		reservedToken.ID, userID, merchantID, domain.VirtualTokenIssuing, now.UTC(), issuanceKey,
@@ -296,8 +296,8 @@ func persistToken(ctx context.Context, executor tokenExecutor, token *domain.Vir
 	return nil
 }
 
-const tokenColumns = `(id, user_id, merchant_id, masked_pan, monthly_limit, spent_in_period,
-	currency, state, period_started, issuance_key, version)`
+const tokenColumns = `id, user_id, merchant_id, masked_pan, monthly_limit, spent_in_period,
+	currency, state, period_started, issuance_key, version`
 
 const tokenSelect = `SELECT id, user_id, merchant_id, masked_pan, monthly_limit, spent_in_period,
 	currency, state, period_started, version FROM virtual_tokens`

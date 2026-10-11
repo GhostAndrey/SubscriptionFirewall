@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -26,14 +27,15 @@ func TestVirtualTokenUpdateVersionRejectsStaleWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get stale: %v", err)
 	}
-	latest, err := repository.GetByID(ctx, "vtok-version")
-	if err != nil {
-		t.Fatalf("get latest: %v", err)
-	}
 	if _, err := repository.Charge(ctx, "vtok-version", 2_500, "USD", now); err != nil {
 		t.Fatalf("charge: %v", err)
 	}
 
+	// Read after the charge, so this copy is current and must be accepted.
+	latest, err := repository.GetByID(ctx, "vtok-version")
+	if err != nil {
+		t.Fatalf("get latest: %v", err)
+	}
 	if err := latest.Freeze(); err != nil {
 		t.Fatalf("freeze: %v", err)
 	}
@@ -186,11 +188,11 @@ func TestLifecycleSyncClaimHandlesAFullBatch(t *testing.T) {
 
 	// A full batch is the case that used to leave the result set open and make
 	// the claim UPDATE fail with "commands out of sync".
-	const queued = 24
-	for i := range queued {
+	const rounds, batch = 2, 16
+	for i := range rounds * batch {
 		task := ports.LifecycleSyncTask{
 			EntityType: "token",
-			EntityID:   "vtok-full-batch-" + string(rune('a'+i)),
+			EntityID:   fmt.Sprintf("vtok-full-batch-%02d", i),
 			Action:     "freeze",
 		}
 		if err := queue.Enqueue(ctx, task); err != nil {
@@ -198,13 +200,13 @@ func TestLifecycleSyncClaimHandlesAFullBatch(t *testing.T) {
 		}
 	}
 
-	for round := range 2 {
-		claimed, err := queue.ClaimBatch(ctx, 16)
+	for round := range rounds {
+		claimed, err := queue.ClaimBatch(ctx, batch)
 		if err != nil {
 			t.Fatalf("claim round %d: %v", round, err)
 		}
-		if len(claimed) != 16 {
-			t.Fatalf("claimed %d tasks in round %d, want 16", len(claimed), round)
+		if len(claimed) != batch {
+			t.Fatalf("claimed %d tasks in round %d, want %d", len(claimed), round, batch)
 		}
 		ids := make([]int64, 0, len(claimed))
 		for _, task := range claimed {
@@ -217,50 +219,63 @@ func TestLifecycleSyncClaimHandlesAFullBatch(t *testing.T) {
 	_ = now
 }
 
-func TestConcurrentLifecycleTransitionsKeepTheLastCharge(t *testing.T) {
+func TestConcurrentChargesAndFreezesKeepEveryDebit(t *testing.T) {
 	db := testDB(t)
 	repository := NewVirtualTokenRepository(db)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
+	const chargeWorkers, freezeWorkers, amount = 4, 4, 1_000
 	if err := repository.Save(ctx, newTestToken(t, "vtok-parallel", 100_000)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	var wg sync.WaitGroup
-	for worker := range 4 {
+	var start sync.WaitGroup
+	start.Add(1)
+
+	for worker := range chargeWorkers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			start.Wait()
+			if _, err := repository.Charge(ctx, "vtok-parallel", amount, "USD", now); err != nil {
+				t.Errorf("charge %d: %v", worker, err)
+			}
+		}()
+	}
+	for worker := range freezeWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start.Wait()
 			loaded, err := repository.GetByID(ctx, "vtok-parallel")
 			if err != nil {
 				t.Errorf("get %d: %v", worker, err)
 				return
 			}
-			switch worker % 2 {
-			case 0:
-				if _, err := repository.Charge(ctx, "vtok-parallel", 1_000, "USD", now); err != nil {
-					t.Errorf("charge %d: %v", worker, err)
-				}
-			default:
-				if err := loaded.Freeze(); err != nil {
-					t.Errorf("freeze %d: %v", worker, err)
-					return
-				}
-				if err := repository.UpdateVersion(ctx, loaded); err != nil &&
-					!errors.Is(err, ports.ErrVersionConflict) {
-					t.Errorf("update %d: %v", worker, err)
-				}
+			if err := loaded.Freeze(); err != nil {
+				t.Errorf("freeze %d: %v", worker, err)
+				return
+			}
+			// A conflict is the expected outcome whenever a charge won the race;
+			// what must never happen is a successful write of a stale budget.
+			if err := repository.UpdateVersion(ctx, loaded); err != nil &&
+				!errors.Is(err, ports.ErrVersionConflict) {
+				t.Errorf("update %d: %v", worker, err)
 			}
 		}()
 	}
+
+	start.Done()
 	wg.Wait()
 
 	final, err := repository.GetByID(ctx, "vtok-parallel")
 	if err != nil {
 		t.Fatalf("get final: %v", err)
 	}
-	if got := final.Snapshot().SpentInPeriod; got != 2_000 {
-		t.Errorf("spent = %d, want 2000: concurrent freezes must not lose a charge", got)
+	if got := final.Snapshot().SpentInPeriod; got != chargeWorkers*amount {
+		t.Errorf("spent = %d, want %d: a freeze must never discard a concurrent debit",
+			got, chargeWorkers*amount)
 	}
 }

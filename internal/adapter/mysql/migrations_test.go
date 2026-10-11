@@ -3,7 +3,10 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"io/fs"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,9 +268,35 @@ func TestMigrationsRollbackAndReapply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after reapply: %v", err)
 	}
-	if restored != 7 {
-		t.Fatalf("expected version 7 after reapplying, got %d", restored)
+	if restored != latestMigrationVersion(t) {
+		t.Fatalf("expected version %d after reapplying, got %d", latestMigrationVersion(t), restored)
 	}
+}
+
+// latestMigrationVersion is the highest version in the embedded migration set.
+// Deriving it keeps the rollback test from having to be edited every time a
+// migration is added.
+func latestMigrationVersion(t *testing.T) int64 {
+	t.Helper()
+
+	entries, err := fs.Glob(migrationsFS, "migrations/*.sql")
+	if err != nil {
+		t.Fatalf("list migrations: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no embedded migrations found")
+	}
+
+	var highest int64
+	for _, entry := range entries {
+		name := entry[strings.LastIndex(entry, "/")+1:]
+		var version int64
+		if _, err := fmt.Sscanf(name, "%05d", &version); err != nil {
+			t.Fatalf("migration %q has no numeric prefix: %v", name, err)
+		}
+		highest = max(highest, version)
+	}
+	return highest
 }
 
 func newTestSubscription(id domain.SubscriptionID, _ context.Context) *domain.Subscription {
