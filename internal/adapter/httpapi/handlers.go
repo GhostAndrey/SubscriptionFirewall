@@ -96,14 +96,9 @@ func (s *Server) handleIngestTransaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if _, err := s.transactions.GetByID(r.Context(), transaction.ID); err == nil {
-		writeError(w, fmt.Errorf("transaction %s: %w", transaction.ID, domain.ErrAlreadyExists))
-		return
-	} else if !errors.Is(err, domain.ErrNotFound) {
-		writeError(w, err)
-		return
-	}
-
+	// The outbox owns the uniqueness check: it inserts the transaction and the
+	// detection job in one step, so a pre-read would only add a round trip and
+	// still leave a window between the two statements.
 	if err := s.outbox.EnqueueWithTransaction(r.Context(), transaction); err != nil {
 		writeError(w, err)
 		return
@@ -115,7 +110,6 @@ func (s *Server) handleIngestTransaction(w http.ResponseWriter, r *http.Request)
 		slog.String("user_id", string(transaction.UserID)),
 		slog.String("merchant_id", string(transaction.MerchantID)),
 		slog.Int64("amount_minor", transaction.AmountMinor),
-
 		slog.String("pan", masking.PAN(request.CardPAN)),
 	)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})

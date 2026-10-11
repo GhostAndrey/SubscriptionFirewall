@@ -32,6 +32,11 @@ type VirtualToken struct {
 	State         VirtualTokenState
 	PeriodStarted time.Time
 
+	// Version increments on every persisted change and drives optimistic
+	// concurrency control: a write is accepted only when the stored version
+	// still matches the one the caller read.
+	Version uint32
+
 	mu sync.Mutex
 }
 
@@ -184,7 +189,24 @@ func (t *VirtualToken) Snapshot() VirtualTokenSnapshot {
 		Currency:      t.Currency,
 		State:         t.State,
 		PeriodStarted: t.PeriodStarted,
+		Version:       t.Version,
 	}
+}
+
+// CurrentVersion reports the version a writer must present to persist this
+// token without losing a concurrent change.
+func (t *VirtualToken) CurrentVersion() uint32 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.Version
+}
+
+// AdmitVersion records the version the storage layer assigned to an accepted
+// write, so the caller can keep mutating the same instance.
+func (t *VirtualToken) AdmitVersion(version uint32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Version = version
 }
 
 type VirtualTokenSnapshot struct {
@@ -197,4 +219,5 @@ type VirtualTokenSnapshot struct {
 	Currency      string
 	State         VirtualTokenState
 	PeriodStarted time.Time
+	Version       uint32
 }

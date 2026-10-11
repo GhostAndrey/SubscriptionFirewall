@@ -52,12 +52,18 @@ func (q *LifecycleSyncQueue) ClaimBatch(ctx context.Context, limit int) ([]ports
 	}
 	defer rows.Close()
 
-	tasks := make([]ports.LifecycleSyncTask, 0, limit)
-	if err := scanLifecycleTasks(rows, &tasks, limit); err != nil {
+	tasks, err := scanLifecycleTasks(rows, limit)
+	if err != nil {
 		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate lifecycle syncs: %w", err)
+	}
+	// The claim UPDATE reuses this connection, so the result set must be fully
+	// consumed and closed first: an open result set makes MySQL reject the next
+	// statement on the same connection with "commands out of sync".
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close lifecycle sync rows: %w", err)
 	}
 	if len(tasks) == 0 {
 		return nil, tx.Commit()
@@ -80,19 +86,20 @@ func (q *LifecycleSyncQueue) ClaimBatch(ctx context.Context, limit int) ([]ports
 	return tasks, nil
 }
 
-func scanLifecycleTasks(rows *sql.Rows, tasks *[]ports.LifecycleSyncTask, limit int) error {
+func scanLifecycleTasks(rows *sql.Rows, limit int) ([]ports.LifecycleSyncTask, error) {
+	tasks := make([]ports.LifecycleSyncTask, 0, limit)
 	for rows.Next() {
+		if len(tasks) == limit {
+			return tasks, nil
+		}
 		var task ports.LifecycleSyncTask
 		if err := rows.Scan(&task.ID, &task.EntityType, &task.EntityID, &task.Action, &task.Attempts); err != nil {
-			return fmt.Errorf("scan lifecycle sync: %w", err)
+			return nil, fmt.Errorf("scan lifecycle sync: %w", err)
 		}
 		task.Attempts++
-		*tasks = append(*tasks, task)
-		if len(*tasks) == limit {
-			return nil
-		}
+		tasks = append(tasks, task)
 	}
-	return nil
+	return tasks, nil
 }
 
 func (q *LifecycleSyncQueue) Complete(ctx context.Context, ids []int64) error {

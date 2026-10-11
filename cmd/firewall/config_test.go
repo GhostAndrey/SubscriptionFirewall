@@ -30,22 +30,23 @@ func TestLoadConfigRejectsMalformedBoolean(t *testing.T) {
 func TestEnvBoolParsesExplicitValues(t *testing.T) {
 	for _, raw := range []string{"1", "t", "T", "TRUE", "true", "True"} {
 		t.Setenv("SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH", raw)
-		got, err := envBool("SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH", false)
-		if err != nil || !got {
-			t.Errorf("envBool(%q) = %v, %v; want true, nil", raw, got, err)
+		var got bool
+		if err := readBool(&got, "SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH"); err != nil || !got {
+			t.Errorf("readBool(%q) = %v, %v; want true, nil", raw, got, err)
 		}
 	}
 	for _, raw := range []string{"0", "f", "F", "FALSE", "false", "False"} {
 		t.Setenv("SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH", raw)
-		got, err := envBool("SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH", true)
-		if err != nil || got {
-			t.Errorf("envBool(%q) = %v, %v; want false, nil", raw, got, err)
+		got := true
+		if err := readBool(&got, "SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH"); err != nil || got {
+			t.Errorf("readBool(%q) = %v, %v; want false, nil", raw, got, err)
 		}
 	}
 
 	t.Setenv("SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH", "")
-	if got, err := envBool("SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH", true); err != nil || !got {
-		t.Errorf("unset must use the fallback, got %v, %v", got, err)
+	got := true
+	if err := readBool(&got, "SUBSCRIPTION_FIREWALL_ALLOW_NO_AUTH"); err != nil || !got {
+		t.Errorf("unset must leave the fallback, got %v, %v", got, err)
 	}
 }
 

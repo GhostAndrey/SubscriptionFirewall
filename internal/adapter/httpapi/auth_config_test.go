@@ -50,7 +50,6 @@ func (f serverFixture) buildServer(t *testing.T, config Config) (*Server, error)
 
 	return NewServer(
 		config,
-		f.transactions,
 		subscriptionService,
 		tokenService,
 		lifecycleService,

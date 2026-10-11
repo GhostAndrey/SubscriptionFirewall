@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -37,15 +39,24 @@ func NewDetectionOutbox(
 	}
 }
 
+// EnqueueWithTransaction stores the transaction and queues a detection job for
+// its user. The uniqueness check mirrors the primary key the SQL adapter relies
+// on, so a replayed ingest is rejected instead of overwriting history.
 func (o *DetectionOutbox) EnqueueWithTransaction(ctx context.Context, transaction domain.Transaction) error {
-	if err := o.transactions.Save(ctx, transaction); err != nil {
-		return err
-	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.closed {
 		return ports.ErrOutboxClosed
 	}
+	if _, err := o.transactions.GetByID(ctx, transaction.ID); err == nil {
+		return fmt.Errorf("transaction %s: %w", transaction.ID, domain.ErrAlreadyExists)
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	if err := o.transactions.Save(ctx, transaction); err != nil {
+		return err
+	}
+
 	select {
 	case o.jobs <- transaction.UserID:
 	default:
@@ -55,54 +66,44 @@ func (o *DetectionOutbox) EnqueueWithTransaction(ctx context.Context, transactio
 	return nil
 }
 
+// ClaimBatch drains up to limit queued users, blocking until at least one is
+// available or the context is cancelled.
 func (o *DetectionOutbox) ClaimBatch(ctx context.Context, limit int) ([]ports.OutboxItem, error) {
 	items := make([]ports.OutboxItem, 0, limit)
-	for {
-
+	for len(items) < limit {
 		select {
 		case userID, ok := <-o.jobs:
 			if !ok {
-
 				if len(items) > 0 {
 					return items, nil
 				}
-				return items, ports.ErrOutboxClosed
+				return nil, ports.ErrOutboxClosed
 			}
 			items = append(items, o.newItem(userID))
-			if len(items) == limit {
+		default:
+			if len(items) > 0 {
 				return items, nil
 			}
-			continue
-		default:
+			return o.claimBlocking(ctx, items)
 		}
-		if len(items) > 0 {
-			return items, nil
-		}
+	}
+	return items, nil
+}
 
-		select {
-		case <-ctx.Done():
-
-			select {
-			case userID, ok := <-o.jobs:
-				if !ok {
-					if len(items) > 0 {
-						return items, nil
-					}
-					return items, ports.ErrOutboxClosed
-				}
-				items = append(items, o.newItem(userID))
-			default:
-				return items, ctx.Err()
+// claimBlocking waits for the next queued user once the backlog is drained, so
+// idle workers sleep instead of spinning on an empty channel.
+func (o *DetectionOutbox) claimBlocking(ctx context.Context, items []ports.OutboxItem) ([]ports.OutboxItem, error) {
+	select {
+	case <-ctx.Done():
+		return items, ctx.Err()
+	case userID, ok := <-o.jobs:
+		if !ok {
+			if len(items) > 0 {
+				return items, nil
 			}
-		case userID, ok := <-o.jobs:
-			if !ok {
-				if len(items) > 0 {
-					return items, nil
-				}
-				return items, ports.ErrOutboxClosed
-			}
-			items = append(items, o.newItem(userID))
+			return nil, ports.ErrOutboxClosed
 		}
+		return append(items, o.newItem(userID)), nil
 	}
 }
 

@@ -21,7 +21,6 @@ import (
 )
 
 type Server struct {
-	transactions  ports.TransactionRepository
 	subscriptions *subscription.Service
 	tokens        *token.Service
 	lifecycle     *lifecycle.Service
@@ -39,7 +38,10 @@ type Config struct {
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
 	ShutdownTimeout time.Duration
-	APIKeys         []string
+	// IdleTimeout bounds how long a keep-alive connection may sit unused
+	// between requests; zero falls back to ReadTimeout.
+	IdleTimeout time.Duration
+	APIKeys     []string
 	// AllowNoAuth starts the server without API key verification. It must be
 	// set explicitly for every environment where keys are absent, because
 	// without either keys or this flag NewServer refuses to start instead of
@@ -63,7 +65,6 @@ type Config struct {
 
 func NewServer(
 	config Config,
-	transactions ports.TransactionRepository,
 	subscriptions *subscription.Service,
 	tokens *token.Service,
 	lifecycleService *lifecycle.Service,
@@ -83,8 +84,11 @@ func NewServer(
 	if clock == nil {
 		clock = systemClock{}
 	}
+	idleTimeout := config.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = config.ReadTimeout
+	}
 	server := &Server{
-		transactions:  transactions,
 		subscriptions: subscriptions,
 		tokens:        tokens,
 		lifecycle:     lifecycleService,
@@ -143,10 +147,12 @@ func NewServer(
 			limiterMiddleware(
 				authenticator.middleware(logger, instrumented)))))
 	server.http = &http.Server{
-		Addr:         config.Address,
-		Handler:      handler,
-		ReadTimeout:  config.ReadTimeout,
-		WriteTimeout: config.WriteTimeout,
+		Addr:              config.Address,
+		Handler:           handler,
+		ReadHeaderTimeout: config.ReadTimeout,
+		ReadTimeout:       config.ReadTimeout,
+		WriteTimeout:      config.WriteTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 	return server, nil
 }
@@ -160,10 +166,13 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	// The Redis client backs the rate limiter, so it must outlive the drain:
+	// closing it first would make in-flight requests fail the limiter check.
+	err := s.http.Shutdown(ctx)
 	if s.redis != nil {
 		_ = s.redis.Close()
 	}
-	return s.http.Shutdown(ctx)
+	return err
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

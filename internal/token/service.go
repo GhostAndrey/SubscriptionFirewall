@@ -2,6 +2,7 @@ package token
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -14,6 +15,7 @@ import (
 const (
 	defaultIssuanceTimeout = 5 * time.Minute
 	issuanceKeyPrefix      = "issue"
+	updateAttempts         = 3
 )
 
 type Service struct {
@@ -55,23 +57,41 @@ func NewService(tokens ports.VirtualTokenRepository, issuer ports.VirtualCardIss
 
 type keyedMutex struct {
 	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	locks map[string]*keyedLock
 }
 
+type keyedLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lock serialises callers that share a key and releases the entry as soon as
+// the last one leaves, so the map stays bounded by concurrent users instead of
+// growing with every pair the process has ever issued a card for.
 func (k *keyedMutex) lock(key string) func() {
 	k.mu.Lock()
 	if k.locks == nil {
-		k.locks = make(map[string]*sync.Mutex)
+		k.locks = make(map[string]*keyedLock)
 	}
-	keyLock, ok := k.locks[key]
+	entry, ok := k.locks[key]
 	if !ok {
-		keyLock = &sync.Mutex{}
-		k.locks[key] = keyLock
+		entry = &keyedLock{}
+		k.locks[key] = entry
 	}
+	entry.refs++
 	k.mu.Unlock()
 
-	keyLock.Lock()
-	return keyLock.Unlock
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(k.locks, key)
+		}
+	}
 }
 
 func (s *Service) Get(ctx context.Context, id domain.VirtualTokenID) (*domain.VirtualToken, error) {
@@ -177,18 +197,30 @@ func (s *Service) Authorize(ctx context.Context, id domain.VirtualTokenID, amoun
 	return token, nil
 }
 
+// mutate loads a token, applies the mutation and persists it under an
+// optimistic version check. A charge that lands between the read and the write
+// bumps the version, so the transition is retried against fresh data instead of
+// overwriting the debited budget.
 func (s *Service) mutate(ctx context.Context, id domain.VirtualTokenID, mutation func(*domain.VirtualToken) error) (*domain.VirtualToken, error) {
-	token, err := s.tokens.GetByID(ctx, id)
-	if err != nil {
-		return nil, fmt.Errorf("load virtual token %s: %w", id, err)
+	var lastErr error
+	for range updateAttempts {
+		token, err := s.tokens.GetByID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("load virtual token %s: %w", id, err)
+		}
+		if err := mutation(token); err != nil {
+			return nil, err
+		}
+		if err := s.tokens.UpdateVersion(ctx, token); err != nil {
+			if errors.Is(err, ports.ErrVersionConflict) {
+				lastErr = err
+				continue
+			}
+			return nil, fmt.Errorf("persist virtual token %s: %w", id, err)
+		}
+		return token, nil
 	}
-	if err := mutation(token); err != nil {
-		return nil, err
-	}
-	if err := s.tokens.Save(ctx, token); err != nil {
-		return nil, fmt.Errorf("persist virtual token %s: %w", id, err)
-	}
-	return token, nil
+	return nil, fmt.Errorf("persist virtual token %s after %d attempts: %w", id, updateAttempts, lastErr)
 }
 
 func issuanceKey(userID domain.UserID, merchantID domain.MerchantID) string {

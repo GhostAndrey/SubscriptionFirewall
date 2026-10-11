@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
 	"subscriptionfirewall/internal/domain"
@@ -153,18 +152,6 @@ func (o *Outbox) PendingCount(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("count pending outbox items: %w", err)
 	}
 	return count, nil
-}
-
-func placeholders(n int) string {
-	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
-}
-
-func int64SliceToAny(values []int64) []any {
-	result := make([]any, len(values))
-	for i, value := range values {
-		result[i] = value
-	}
-	return result
 }
 
 var _ ports.DetectionOutbox = (*Outbox)(nil)
