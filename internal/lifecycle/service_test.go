@@ -31,6 +31,8 @@ type harness struct {
 	toks          *token.Service
 	service       *Service
 	metrics       *obs.Metrics
+	logger        *slog.Logger
+	fixedNow      fixedClock
 }
 
 func newHarness(t *testing.T, now time.Time) *harness {
@@ -57,6 +59,8 @@ func newHarness(t *testing.T, now time.Time) *harness {
 		subs:          subs,
 		toks:          toks,
 		metrics:       metrics,
+		logger:        logger,
+		fixedNow:      fixedClock{now: now},
 		service: NewService(subs, toks, Options{
 			Queue:   queue,
 			Audit:   audit,

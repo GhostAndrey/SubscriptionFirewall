@@ -92,17 +92,25 @@ func loadConfig() (config, error) {
 		func() error { return readPositiveDuration(&cfg.readTimeout, "SUBSCRIPTION_FIREWALL_READ_TIMEOUT") },
 		func() error { return readPositiveDuration(&cfg.writeTimeout, "SUBSCRIPTION_FIREWALL_WRITE_TIMEOUT") },
 		func() error { return readNonNegativeDuration(&cfg.idleTimeout, "SUBSCRIPTION_FIREWALL_IDLE_TIMEOUT") },
-		func() error { return readPositiveDuration(&cfg.shutdownTimeout, "SUBSCRIPTION_FIREWALL_SHUTDOWN_TIMEOUT") },
+		func() error {
+			return readPositiveDuration(&cfg.shutdownTimeout, "SUBSCRIPTION_FIREWALL_SHUTDOWN_TIMEOUT")
+		},
 		func() error { return readPositiveInt(&cfg.dbMaxOpenConns, "SUBSCRIPTION_FIREWALL_DB_MAX_OPEN_CONNS") },
-		func() error { return readNonNegativeInt(&cfg.dbMaxIdleConns, "SUBSCRIPTION_FIREWALL_DB_MAX_IDLE_CONNS") },
+		func() error {
+			return readNonNegativeInt(&cfg.dbMaxIdleConns, "SUBSCRIPTION_FIREWALL_DB_MAX_IDLE_CONNS")
+		},
 		func() error {
 			return readPositiveDuration(&cfg.dbConnMaxLifetime, "SUBSCRIPTION_FIREWALL_DB_CONN_MAX_LIFETIME")
 		},
-		func() error { return readEnum(&cfg.storage, "SUBSCRIPTION_FIREWALL_STORAGE", storageAuto, storageMemory, storageMySQL) },
+		func() error {
+			return readEnum(&cfg.storage, "SUBSCRIPTION_FIREWALL_STORAGE", storageAuto, storageMemory, storageMySQL)
+		},
 		func() error { return readEnum(&cfg.issuer, "SUBSCRIPTION_FIREWALL_ISSUER", issuerSimulated) },
 		func() error { return readLogLevel(&cfg.logLevel, "SUBSCRIPTION_FIREWALL_LOG_LEVEL") },
 		func() error { return readBool(&cfg.otlpInsecure, "SUBSCRIPTION_FIREWALL_OTLP_INSECURE") },
-		func() error { return readNonNegativeDuration(&cfg.issuerTimeout, "SUBSCRIPTION_FIREWALL_ISSUER_TIMEOUT") },
+		func() error {
+			return readNonNegativeDuration(&cfg.issuerTimeout, "SUBSCRIPTION_FIREWALL_ISSUER_TIMEOUT")
+		},
 		func() error { return readNonNegativeInt(&cfg.issuerRetries, "SUBSCRIPTION_FIREWALL_ISSUER_RETRIES") },
 		func() error {
 			return readPositiveInt(&cfg.issuerBreakerThreshold, "SUBSCRIPTION_FIREWALL_ISSUER_BREAKER_THRESHOLD")
@@ -110,7 +118,9 @@ func loadConfig() (config, error) {
 		func() error {
 			return readPositiveDuration(&cfg.issuerBreakerCooldown, "SUBSCRIPTION_FIREWALL_ISSUER_BREAKER_COOLDOWN")
 		},
-		func() error { return readPositiveDuration(&cfg.issuanceTimeout, "SUBSCRIPTION_FIREWALL_ISSUANCE_TIMEOUT") },
+		func() error {
+			return readPositiveDuration(&cfg.issuanceTimeout, "SUBSCRIPTION_FIREWALL_ISSUANCE_TIMEOUT")
+		},
 	} {
 		if err := read(); err != nil {
 			return cfg, err
@@ -203,7 +213,8 @@ func readPositiveInt64(target *int64, name string) error {
 
 // readInt64 writes into target only when the variable is set, so the default
 // seeded during construction survives an unset variable.
-func readInt64(target *int64, name string, allowZero bool) error {	configured := os.Getenv(name)
+func readInt64(target *int64, name string, allowZero bool) error {
+	configured := os.Getenv(name)
 	if configured == "" {
 		return nil
 	}

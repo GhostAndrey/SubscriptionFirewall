@@ -216,13 +216,15 @@ type changeable interface {
 	apply(ctx context.Context, s *Service, action Action) error
 }
 
-func changeOf(subscription *domain.Subscription) changeable { return subscriptionChange{subscription.ID} }
-func changeOfToken(token *domain.VirtualToken) changeable   { return tokenChange{token.ID} }
+func changeOf(subscription *domain.Subscription) changeable {
+	return subscriptionChange{subscription.ID}
+}
+func changeOfToken(token *domain.VirtualToken) changeable { return tokenChange{token.ID} }
 
 type subscriptionChange struct{ id domain.SubscriptionID }
 
 func (subscriptionChange) entityType() string { return entitySubscription }
-func (c subscriptionChange) entityID() string  { return string(c.id) }
+func (c subscriptionChange) entityID() string { return string(c.id) }
 func (c subscriptionChange) apply(ctx context.Context, s *Service, action Action) error {
 	_, err := s.applySubscription(ctx, c.id, action)
 	return err
@@ -231,7 +233,7 @@ func (c subscriptionChange) apply(ctx context.Context, s *Service, action Action
 type tokenChange struct{ id domain.VirtualTokenID }
 
 func (tokenChange) entityType() string { return entityToken }
-func (c tokenChange) entityID() string  { return string(c.id) }
+func (c tokenChange) entityID() string { return string(c.id) }
 func (c tokenChange) apply(ctx context.Context, s *Service, action Action) error {
 	_, err := s.applyToken(ctx, c.id, action)
 	return err

@@ -402,6 +402,9 @@ func (r *VirtualTokenRepository) Charge(
 	if err := token.ApplyCharge(amountMinor, currency, now); err != nil {
 		return nil, err
 	}
+	// Charge bumps the version so a lifecycle transition that read the token
+	// before this debit is rejected instead of writing a stale budget back.
+	token.AdmitVersion(token.CurrentVersion() + 1)
 	r.tokens[id] = token
 	return cloneToken(token), nil
 }
@@ -447,6 +450,7 @@ func (r *VirtualTokenRepository) CompleteTokenIssuance(
 	if err := token.CompleteIssuance(card.MaskedPAN, card.MonthlyLimit, card.Currency, now); err != nil {
 		return nil, err
 	}
+	token.AdmitVersion(token.CurrentVersion() + 1)
 	r.tokens[tokenID] = token
 	return cloneToken(token), nil
 }
