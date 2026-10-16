@@ -12,9 +12,8 @@ import (
 
 const maxLifecycleSyncAttempts = 8
 
-// LifecycleSyncQueue mirrors the MySQL adapter in memory. It supports the same
-// claim, retry and stale-recovery semantics so dev and tests observe the same
-// behaviour as production.
+// LifecycleSyncQueue mirrors the MySQL adapter in memory with the same claim,
+// retry and stale-recovery semantics.
 type LifecycleSyncQueue struct {
 	mu     sync.Mutex
 	tasks  map[int64]*lifecycleEntry
@@ -119,8 +118,8 @@ func (q *LifecycleSyncQueue) PendingCount(context.Context) (int64, error) {
 	return pending, nil
 }
 
-// idsInOrder lists task ids oldest first, which is the order claims are
-// handed out in so a backlog is replayed in the sequence it was created.
+// idsInOrder lists task ids oldest first so claims replay a backlog in the
+// sequence it was created.
 func (q *LifecycleSyncQueue) idsInOrder() []int64 {
 	ids := make([]int64, 0, len(q.tasks))
 	for id := range q.tasks {

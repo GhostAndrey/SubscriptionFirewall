@@ -58,8 +58,6 @@ type Transaction struct {
 	AuthorizedAt time.Time
 }
 
-// Validate reports whether the transaction satisfies every invariant the
-// persistence layer and the detector rely on.
 func (t Transaction) Validate(now time.Time) error {
 	if err := validateText(
 		textRule{field: "id", value: string(t.ID), maxBytes: MaxTransactionIDLength, required: true},

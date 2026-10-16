@@ -13,8 +13,6 @@ import (
 
 const staleTaskAfter = 5 * time.Minute
 
-// Syncer replays lifecycle actions that were deferred because the counterpart
-// entity could not be updated inline.
 type Syncer struct {
 	service *Service
 	queue   ports.LifecycleSyncQueue

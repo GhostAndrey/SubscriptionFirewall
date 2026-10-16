@@ -10,8 +10,8 @@ import (
 )
 
 // ResilientIssuer decorates a VirtualCardIssuer with per-call timeout,
-// bounded retries with backoff and a circuit breaker. When the provider
-// misbehaves, the breaker fails fast instead of hanging token provisioning.
+// bounded retries and a circuit breaker, so a misbehaving provider fails fast
+// instead of hanging token provisioning.
 type ResilientIssuer struct {
 	inner   ports.VirtualCardIssuer
 	timeout time.Duration

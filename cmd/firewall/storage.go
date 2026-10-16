@@ -12,8 +12,6 @@ import (
 	"subscriptionfirewall/internal/ports"
 )
 
-// storage bundles every persistence port the application needs, so callers
-// depend on one aggregate instead of six separate adapters.
 type storage struct {
 	transactions   ports.TransactionRepository
 	subscriptions  ports.SubscriptionRepository
@@ -25,9 +23,6 @@ type storage struct {
 	close          func()
 }
 
-// openStorage builds the persistence layer selected by cfg.storage. The MySQL
-// variant is the only one safe across replicas; the in-memory variant exists
-// for local runs and tests and keeps its data in the process.
 func openStorage(
 	ctx context.Context,
 	cfg config,
@@ -72,8 +67,6 @@ func openMySQLStorage(ctx context.Context, cfg config, logger *slog.Logger) (*st
 	}, nil
 }
 
-// readiness reports whether the storage layer can serve traffic. In-memory
-// storage has no external dependency to probe.
 func (s *storage) readiness(ctx context.Context) error {
 	if s.database == nil {
 		return nil

@@ -14,8 +14,8 @@ import (
 	"subscriptionfirewall/internal/version"
 )
 
-// SetupTracing configures the global tracer provider with OTLP/HTTP export.
-// An empty endpoint disables tracing: spans become no-ops and shutdown is nil.
+// SetupTracing configures the global tracer provider with OTLP/HTTP export;
+// an empty endpoint disables tracing.
 func SetupTracing(ctx context.Context, endpoint string, insecure bool) (func(context.Context) error, error) {
 	if endpoint == "" {
 		return nil, nil

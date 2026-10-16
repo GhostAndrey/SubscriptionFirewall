@@ -24,9 +24,6 @@ const staleItemAfter = 5 * time.Minute
 
 var tracer = otel.Tracer("subscriptionfirewall/pipeline")
 
-// Pipeline turns ingested transactions into detected subscriptions: it claims
-// queued users, runs the detector and provisions the virtual cards behind each
-// detection.
 type Pipeline struct {
 	outbox        ports.DetectionOutbox
 	detector      *detector.Detector

@@ -175,8 +175,7 @@ func (r *SubscriptionRepository) CreateIfAbsent(_ context.Context, subscription 
 }
 
 // UpdateVersion reproduces the optimistic concurrency guarantee of the MySQL
-// adapter so that tests exercising the memory storage observe the same
-// conflicts as production.
+// adapter.
 func (r *SubscriptionRepository) UpdateVersion(_ context.Context, subscription *domain.Subscription) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -295,8 +294,7 @@ func (r *VirtualTokenRepository) Save(_ context.Context, token *domain.VirtualTo
 }
 
 // UpdateVersion reproduces the optimistic concurrency guarantee of the MySQL
-// adapter so that tests exercising the memory storage observe the same
-// conflicts as production.
+// adapter.
 func (r *VirtualTokenRepository) UpdateVersion(_ context.Context, token *domain.VirtualToken) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -354,8 +352,8 @@ func (r *VirtualTokenRepository) ListByUserPage(_ context.Context, userID domain
 	return pageSlice(listed, page), nil
 }
 
-// pageSlice narrows a sorted listing to one page. Bounds are clamped so a page
-// request past the end yields an empty slice rather than panicking.
+// pageSlice narrows a sorted listing to one page; bounds are clamped so a page
+// past the end yields an empty slice.
 func pageSlice[T any](items []T, page ports.Page) []T {
 	if page.IsUnbounded() {
 		return items

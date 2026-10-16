@@ -63,9 +63,8 @@ func NewVirtualToken(id VirtualTokenID, userID UserID, merchantID MerchantID, ma
 }
 
 // NewIssuingVirtualToken creates a reservation for a card that has not been
-// provisioned yet. The reservation is persisted before the issuer is called so
-// that concurrent attempts for the same user and merchant cannot both charge
-// the card provider.
+// provisioned yet; it is persisted before the issuer is called so concurrent
+// attempts for the same user and merchant cannot both charge the provider.
 func NewIssuingVirtualToken(id VirtualTokenID, userID UserID, merchantID MerchantID, now time.Time) *VirtualToken {
 	return &VirtualToken{
 		ID:            id,
@@ -76,8 +75,6 @@ func NewIssuingVirtualToken(id VirtualTokenID, userID UserID, merchantID Merchan
 	}
 }
 
-// CompleteIssuance promotes a reservation to an active card once the provider
-// returns it.
 func (t *VirtualToken) CompleteIssuance(maskedPAN string, monthlyLimit int64, currency string, now time.Time) error {
 	if t.State != VirtualTokenIssuing {
 		return fmt.Errorf("cannot complete issuance of token %s in state %s: %w", t.ID, t.State, ErrInvalidTransition)
@@ -109,10 +106,8 @@ func (t *VirtualToken) AuthorizeCharge(amountMinor int64, currency string, now t
 	return t.ApplyCharge(amountMinor, currency, now)
 }
 
-// ApplyCharge debits amountMinor from the current period and fails when the
-// token is not active, the currency differs, or the monthly limit would be
-// exceeded. The caller must guarantee that no other goroutine observes the
-// token while it runs.
+// ApplyCharge debits amountMinor from the current period. The caller must
+// guarantee that no other goroutine observes the token while it runs.
 func (t *VirtualToken) ApplyCharge(amountMinor int64, currency string, now time.Time) error {
 	if amountMinor <= 0 {
 		return fmt.Errorf("charge amount %d: %w", amountMinor, ErrInvalidAmount)
@@ -202,7 +197,7 @@ func (t *VirtualToken) CurrentVersion() uint32 {
 }
 
 // AdmitVersion records the version the storage layer assigned to an accepted
-// write, so the caller can keep mutating the same instance.
+// write.
 func (t *VirtualToken) AdmitVersion(version uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

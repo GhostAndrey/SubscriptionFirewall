@@ -40,8 +40,8 @@ func NewDetectionOutbox(
 }
 
 // EnqueueWithTransaction stores the transaction and queues a detection job for
-// its user. The uniqueness check mirrors the primary key the SQL adapter relies
-// on, so a replayed ingest is rejected instead of overwriting history.
+// its user; a replayed ingest is rejected, mirroring the primary key of the SQL
+// adapter.
 func (o *DetectionOutbox) EnqueueWithTransaction(ctx context.Context, transaction domain.Transaction) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()

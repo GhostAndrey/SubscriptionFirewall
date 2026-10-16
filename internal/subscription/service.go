@@ -162,8 +162,6 @@ func (s *Service) ApplyDetection(ctx context.Context, detected domain.DetectedSu
 	return s.mergeWithRetry(ctx, detected, virtualTokenID)
 }
 
-// mergeWithRetry folds a detection into an existing subscription, retrying
-// while another replica keeps changing the same row.
 func (s *Service) mergeWithRetry(ctx context.Context, detected domain.DetectedSubscription, virtualTokenID string) (*domain.Subscription, error) {
 	var lastErr error
 	for range updateAttempts {
@@ -218,8 +216,6 @@ func (s *Service) newDetectedSubscription(detected domain.DetectedSubscription, 
 	return created, nil
 }
 
-// markMissed re-reads the subscription and applies the overdue transition under
-// an optimistic version check, skipping the row when another replica wins.
 func (s *Service) markMissed(ctx context.Context, subscription *domain.Subscription, now time.Time) error {
 	for range updateAttempts {
 		current, err := s.subscriptions.GetByID(ctx, subscription.ID)

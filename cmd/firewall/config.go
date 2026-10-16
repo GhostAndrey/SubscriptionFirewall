@@ -48,9 +48,8 @@ type config struct {
 	issuer                  string
 }
 
-// loadConfig reads every knob from the environment. Each parser returns an error
-// instead of falling back silently, so a typo is caught at startup rather than
-// at the moment the misconfigured subsystem is first exercised.
+// loadConfig reads every knob from the environment; parsers return an error
+// instead of falling back silently, so a typo is caught at startup.
 func loadConfig() (config, error) {
 	cfg := config{
 		address:                 configuredAddress(),
@@ -137,9 +136,9 @@ func loadConfig() (config, error) {
 	return cfg, nil
 }
 
-// resolveStorage settles the storage backend against the DSN. auto follows the
-// DSN; an explicit choice must agree with it, because a mismatch would silently
-// discard configured data or run replicas on separate stores.
+// resolveStorage settles the storage backend against the DSN: auto follows the
+// DSN, while an explicit choice must agree with it, because a mismatch would
+// silently discard configured data or run replicas on separate stores.
 func resolveStorage(cfg *config) error {
 	switch cfg.storage {
 	case storageMySQL:
@@ -211,8 +210,6 @@ func readPositiveInt64(target *int64, name string) error {
 	return readInt64(target, name, false)
 }
 
-// readInt64 writes into target only when the variable is set, so the default
-// seeded during construction survives an unset variable.
 func readInt64(target *int64, name string, allowZero bool) error {
 	configured := os.Getenv(name)
 	if configured == "" {

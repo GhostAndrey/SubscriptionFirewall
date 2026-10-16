@@ -94,9 +94,8 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// statusRecorder captures the response status for logging and metrics. It
-// forwards to the wrapped writer through Unwrap so handlers keep full access
-// to flushing, hijacking and the original ResponseWriter API.
+// statusRecorder captures the response status for logging and metrics; Unwrap
+// keeps flushing, hijacking and the original ResponseWriter API reachable.
 type statusRecorder struct {
 	http.ResponseWriter
 	status  int
@@ -131,8 +130,6 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
-// Hijack forwards to the wrapped writer when it supports hijacking, which
-// keeps websockets and similar upgrades working through the middleware chain.
 func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hijacker, ok := r.ResponseWriter.(http.Hijacker)
 	if !ok {
@@ -148,18 +145,12 @@ func (r *statusRecorder) Status() int {
 	return r.status
 }
 
-// observationMiddleware records one entry per request: the status code and the
-// latency feed both the access log and the Prometheus metrics, so the chain
-// wraps the handler exactly once.
 func observationMiddleware(logger *slog.Logger, metrics *obs.Metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w}
 
-		// The deferred observer reads the request context captured by the
-		// closure, which is the context the handler runs under. contextcheck
-		// cannot see that indirection.
-		defer func() { //nolint:contextcheck // see above
+		defer func() { //nolint:contextcheck // contextcheck cannot see the captured closure
 			route := r.Pattern
 			if route == "" {
 				route = "unmatched"
@@ -181,10 +172,7 @@ func observationMiddleware(logger *slog.Logger, metrics *obs.Metrics, next http.
 
 func recoveryMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The deferred guard reads the request context captured by the closure, which
-		// is the context the handler runs under. contextcheck cannot see that
-		// indirection.
-		defer func() { //nolint:contextcheck // see above
+		defer func() { //nolint:contextcheck // contextcheck cannot see the captured closure
 			recovered := recover()
 			if recovered == nil {
 				return
@@ -201,10 +189,6 @@ func recoveryMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
-// requestIDMiddleware assigns every request a correlation id: the incoming
-// X-Request-Id header when present and well-formed, a random hex id otherwise.
-// The id is echoed in the response and a request-scoped logger carrying it is
-// stored in the context for downstream handlers.
 func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := incomingRequestID(r.Header.Get("X-Request-Id"))

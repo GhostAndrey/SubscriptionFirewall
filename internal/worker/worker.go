@@ -16,7 +16,6 @@ const (
 	claimRetryDelay = time.Second
 )
 
-// Runner owns the goroutines that drain one queue of T.
 type Runner[T any] struct {
 	claim    func(ctx context.Context, limit int) ([]T, error)
 	complete func(ctx context.Context, ids []int64) error
@@ -33,26 +32,19 @@ type Runner[T any] struct {
 	stopped  bool
 }
 
-// Options configures a Runner over a queue of T.
 type Options[T any] struct {
-	// Claim reserves a batch of items for this worker.
-	Claim func(ctx context.Context, limit int) ([]T, error)
-	// Complete acknowledges the given item ids.
+	Claim    func(ctx context.Context, limit int) ([]T, error)
 	Complete func(ctx context.Context, ids []int64) error
-	// Process handles one item. It must not block indefinitely, because the
-	// batch it belongs to is acknowledged only after it returns.
-	Process func(ctx context.Context, item T)
-	// Maintenance requeues stale entries and refreshes gauges. Nil disables
+	Process  func(ctx context.Context, item T)
+	// Maintenance requeues stale entries and refreshes gauges; nil disables
 	// the maintenance loop.
 	Maintenance func(ctx context.Context)
-	// MaintenanceInterval is the maintenance tick; zero defaults to one minute.
+	// Zero defaults to one minute.
 	MaintenanceInterval time.Duration
-	// Name labels the workers in log records.
-	Name   string
-	Logger *slog.Logger
+	Name                string
+	Logger              *slog.Logger
 }
 
-// New builds a runner from the given options.
 func New[T any](options Options[T]) *Runner[T] {
 	if options.Logger == nil {
 		options.Logger = slog.Default()
@@ -71,9 +63,8 @@ func New[T any](options Options[T]) *Runner[T] {
 	}
 }
 
-// Start launches workerCount processing goroutines plus the maintenance loop.
-// Starting twice is a no-op, so a partially failed start cannot double the
-// number of consumers.
+// Start launches workerCount processing goroutines plus the maintenance loop;
+// starting twice is a no-op.
 func (r *Runner[T]) Start(ctx context.Context, workerCount int) {
 	workerContext, cancel := context.WithCancel(ctx)
 
@@ -99,7 +90,6 @@ func (r *Runner[T]) Start(ctx context.Context, workerCount int) {
 	r.logger.Info(r.name+" started", "workers", workerCount)
 }
 
-// Stop cancels the loops and waits for the in-flight batches to drain.
 func (r *Runner[T]) Stop() {
 	r.mu.Lock()
 	if !r.stopped {
@@ -153,8 +143,8 @@ func (r *Runner[T]) maintenanceLoop(ctx context.Context) {
 	}
 }
 
-// Sleep waits for the delay and reports whether it elapsed. A cancelled context
-// returns false, which callers use to leave their loop.
+// Sleep waits for the delay and reports whether it elapsed; a cancelled
+// context returns false, which callers use to leave their loop.
 func Sleep(ctx context.Context, delay time.Duration) bool {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()

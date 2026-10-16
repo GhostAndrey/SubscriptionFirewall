@@ -162,10 +162,9 @@ func (s *Service) ChangeToken(ctx context.Context, actor string, id domain.Virtu
 	return changed, nil
 }
 
-// SyncZombie freezes the card of a subscription that stopped charging, so a
-// zombie subscription can no longer authorize merchant charges. The
-// subscription transition belongs to the sweep and is never compensated here:
-// a zombie must stay a zombie, so the card freeze is only ever deferred.
+// SyncZombie freezes the card of a subscription that stopped charging. A
+// zombie must stay a zombie, so the card freeze is never compensated, only
+// deferred.
 func (s *Service) SyncZombie(ctx context.Context, subscription *domain.Subscription) error {
 	if subscription.State != domain.SubscriptionZombie || subscription.VirtualTokenID == "" {
 		return nil
@@ -207,9 +206,6 @@ func (s *Service) writeAudit(ctx context.Context, actor string, action Action, e
 	}
 }
 
-// changeable is the pair of operations a lifecycle action needs on either
-// entity type. It lets the rollback path stay generic without inspecting
-// concrete types.
 type changeable interface {
 	entityType() string
 	entityID() string

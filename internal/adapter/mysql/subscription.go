@@ -19,9 +19,6 @@ func NewSubscriptionRepository(db *sql.DB) *SubscriptionRepository {
 	return &SubscriptionRepository{db: db}
 }
 
-// Save inserts a new subscription or replaces an existing row addressed by
-// id. It is intended for seeding and tests; concurrent use-case updates go
-// through UpdateVersion.
 func (r *SubscriptionRepository) Save(ctx context.Context, subscription *domain.Subscription) error {
 	if _, err := r.db.ExecContext(ctx, subscriptionUpsert, subscriptionArgs(subscription)...); err != nil {
 		return fmt.Errorf("save subscription %s: %w", subscription.ID, err)
@@ -107,10 +104,8 @@ func (r *SubscriptionRepository) ListByUserPage(ctx context.Context, userID doma
 }
 
 // ListPendingZombieTransition selects exactly the rows whose overdue check has
-// not been evaluated yet. The per-window condition mirrors Subscription.MarkMissed
-// and excluding already-zombie rows guarantees a sweep pass terminates instead
-// of re-reading the same overdue rows forever. The comparison is strict so the
-// query never returns a row the domain rule would refuse to transition.
+// not been evaluated yet; the comparison is strict so the query never returns
+// a row the domain rule would refuse to transition.
 func (r *SubscriptionRepository) ListPendingZombieTransition(ctx context.Context, now time.Time, limit int) ([]*domain.Subscription, error) {
 	const pendingZombie = `state IN (?, ?) AND (
 			(billing_window = '7d'   AND next_expected_at < DATE_SUB(?, INTERVAL 7 DAY)) OR
@@ -123,9 +118,8 @@ func (r *SubscriptionRepository) ListPendingZombieTransition(ctx context.Context
 		now.UTC(), now.UTC(), now.UTC(), limit)
 }
 
-// classifyUpdateMiss separates a missing row from a genuine version conflict.
-// Both produce zero affected rows, but only the second one is retryable, so
-// collapsing them would make a deleted subscription surface as a conflict.
+// classifyUpdateMiss separates a missing row from a genuine version conflict;
+// only the latter is retryable.
 func (r *SubscriptionRepository) classifyUpdateMiss(ctx context.Context, subscription *domain.Subscription) error {
 	var existing uint32
 	err := r.db.QueryRowContext(ctx,

@@ -20,9 +20,6 @@ func NewVirtualTokenRepository(db *sql.DB) *VirtualTokenRepository {
 	return &VirtualTokenRepository{db: db}
 }
 
-// Save inserts a new token or replaces an existing row addressed by id. It is
-// intended for seeding and tests; concurrent use-case updates go through
-// UpdateVersion.
 func (r *VirtualTokenRepository) Save(ctx context.Context, token *domain.VirtualToken) error {
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO virtual_tokens (`+tokenColumns+`)
@@ -41,10 +38,9 @@ func (r *VirtualTokenRepository) Save(ctx context.Context, token *domain.Virtual
 	})
 }
 
-// UpdateVersion persists the lifecycle fields of a token only when the row still
-// carries the version the caller read. A charge that commits in between bumps
-// the version too, so the transition is rejected instead of writing a stale
-// spent_in_period back over it.
+// UpdateVersion persists the lifecycle fields of a token only when the row
+// still carries the version the caller read, so a charge that committed in
+// between cannot be overwritten by a stale spent_in_period.
 func (r *VirtualTokenRepository) UpdateVersion(ctx context.Context, token *domain.VirtualToken) error {
 	version := token.CurrentVersion()
 	current := token.Snapshot()
@@ -121,10 +117,9 @@ func (r *VirtualTokenRepository) ListByUserPage(ctx context.Context, userID doma
 	return tokens, nil
 }
 
-// Charge reads the token under an exclusive row lock, applies the domain rule
-// and persists the result inside one transaction. Concurrent charges from any
-// replica queue on the same row, so the monthly limit cannot be exceeded by
-// interleaved read-modify-write pairs.
+// Charge reads the token under an exclusive row lock and persists the result
+// inside one transaction, so the monthly limit cannot be exceeded by
+// interleaved read-modify-write pairs from any replica.
 func (r *VirtualTokenRepository) Charge(
 	ctx context.Context,
 	id domain.VirtualTokenID,
@@ -262,9 +257,8 @@ func (r *VirtualTokenRepository) ReleaseTokenIssuance(ctx context.Context, token
 	return nil
 }
 
-// classifyUpdateMiss separates a missing row from a genuine version conflict.
-// Both produce zero affected rows, but only the second one is retryable, so
-// collapsing them would make a deleted token surface as a conflict.
+// classifyUpdateMiss separates a missing row from a genuine version conflict;
+// only the latter is retryable.
 func (r *VirtualTokenRepository) classifyUpdateMiss(ctx context.Context, token *domain.VirtualToken, version uint32) error {
 	var existing uint32
 	err := r.db.QueryRowContext(ctx,

@@ -100,8 +100,6 @@ func run() error {
 	return nil
 }
 
-// shutdownTracingOnExit flushes buffered spans; the tracer provider is closed
-// last so spans emitted during shutdown still reach the collector.
 func shutdownTracingOnExit(shutdownTracing func(context.Context) error, timeout time.Duration, logger *slog.Logger) {
 	if shutdownTracing == nil {
 		return

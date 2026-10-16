@@ -37,10 +37,6 @@ type apiKeyAuthenticator struct {
 	keys []apiKey
 }
 
-// newAPIKeyAuthenticator parses the configured key list. An entry is either a
-// bare key, which gets full access, or "key:scope,scope". An entry with an
-// empty scope list would grant nothing while still looking configured, so it is
-// rejected at startup instead of silently disabling the key.
 func newAPIKeyAuthenticator(keys []string) *apiKeyAuthenticator {
 	parsed := make([]apiKey, 0, len(keys))
 	for _, entry := range keys {

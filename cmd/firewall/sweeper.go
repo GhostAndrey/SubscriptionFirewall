@@ -23,8 +23,8 @@ const (
 )
 
 // subscriptionSweeper marks overdue subscriptions as zombies on a fixed
-// interval. It exposes an explicit lifecycle so shutdown can wait for the pass
-// in flight instead of closing the database underneath it.
+// interval and waits for the pass in flight on shutdown instead of closing the
+// database underneath it.
 type subscriptionSweeper struct {
 	database      *sql.DB
 	subscriptions *subscription.Service
@@ -66,8 +66,8 @@ func (s *subscriptionSweeper) start(ctx context.Context) {
 	go s.loop(ctx)
 }
 
-// stop waits for the pass in flight to finish. A sweeper that was never started
-// has nothing to wait for, so shutdown must not block on it.
+// stop waits for the pass in flight to finish. A sweeper that was never
+// started has nothing to wait for.
 func (s *subscriptionSweeper) stop() {
 	s.once.Do(func() { close(s.stopped) })
 	if !s.started.Load() {
@@ -133,8 +133,7 @@ func (s *subscriptionSweeper) sweepOnce(ctx context.Context) {
 }
 
 // detach keeps the shutdown deadline off work that must still reach the
-// database, so an interrupted sweep cannot leave a zombie subscription with an
-// active card.
+// database.
 func detach(ctx context.Context) context.Context {
 	if ctx.Err() == nil {
 		return ctx

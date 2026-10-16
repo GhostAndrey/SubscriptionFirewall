@@ -32,11 +32,9 @@ type TransactionRepository interface {
 	ListByUserSince(ctx context.Context, userID domain.UserID, since time.Time) ([]domain.Transaction, error)
 	// ListRecurringMerchantCandidates returns the merchants a user charged at
 	// least minOccurrences times since the given instant, together with that
-	// count. The detector uses it to skip merchants that cannot produce a
-	// verdict before pulling their transaction history into memory.
+	// count, so the detector can skip merchants that cannot produce a verdict
+	// before pulling their transaction history into memory.
 	ListRecurringMerchantCandidates(ctx context.Context, userID domain.UserID, since time.Time, minOccurrences int) ([]MerchantChargeCount, error)
-	// ListByUserAndMerchants returns the transactions of a user for the given
-	// merchants since an instant.
 	ListByUserAndMerchants(ctx context.Context, userID domain.UserID, merchants []domain.MerchantID, since time.Time) ([]domain.Transaction, error)
 }
 
@@ -67,18 +65,17 @@ type SubscriptionRepository interface {
 	// ErrVersionConflict when the caller must re-read and retry.
 	UpdateVersion(ctx context.Context, subscription *domain.Subscription) error
 	// CreateIfAbsent stores the subscription only when the user and merchant
-	// pair has none, and always returns the canonical row. Concurrent
-	// detections of the same pair therefore converge on a single subscription.
+	// pair has none, and always returns the canonical row, so concurrent
+	// detections of the same pair converge on a single subscription.
 	CreateIfAbsent(ctx context.Context, subscription *domain.Subscription) (*domain.Subscription, error)
 	GetByID(ctx context.Context, id domain.SubscriptionID) (*domain.Subscription, error)
 	FindByUserAndMerchant(ctx context.Context, userID domain.UserID, merchantID domain.MerchantID) (*domain.Subscription, error)
 	// ListByUserPage returns one page of a user's subscriptions ordered by id.
 	ListByUserPage(ctx context.Context, userID domain.UserID, page Page) ([]*domain.Subscription, error)
-	// ListPendingZombieTransition returns subscriptions that are still
-	// active or trial and are already past their billing window, oldest due
-	// date first, capped at limit. The set is exactly the rows the sweep can
-	// still act on, so a sweep pass always terminates and its cost scales with
-	// the backlog rather than with the total subscription count.
+	// ListPendingZombieTransition returns subscriptions that are still active
+	// or trial and are already past their billing window, oldest due date
+	// first, capped at limit. The set is exactly the rows the sweep can still
+	// act on, so a sweep pass always terminates.
 	ListPendingZombieTransition(ctx context.Context, now time.Time, limit int) ([]*domain.Subscription, error)
 }
 

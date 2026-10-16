@@ -12,9 +12,8 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Migrate applies versioned SQL migrations (internal/adapter/mysql/migrations)
-// with goose. Application is transactional per migration and recorded in the
-// goose_db_version table; repeating it on every start is a no-op.
+// Migrate applies versioned SQL migrations with goose; repeating it on every
+// start is a no-op.
 func Migrate(ctx context.Context, db *sql.DB) error {
 	if err := prepareGoose(); err != nil {
 		return err
@@ -25,8 +24,6 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// Rollback reverts migrations down to (but not including) target, so a bad
-// release can be undone without reaching for the goose binary on the host.
 func Rollback(ctx context.Context, db *sql.DB, target int64) error {
 	if err := prepareGoose(); err != nil {
 		return err
@@ -37,7 +34,6 @@ func Rollback(ctx context.Context, db *sql.DB, target int64) error {
 	return nil
 }
 
-// MigrationVersion reports the highest applied migration.
 func MigrationVersion(ctx context.Context, db *sql.DB) (int64, error) {
 	if err := prepareGoose(); err != nil {
 		return 0, err

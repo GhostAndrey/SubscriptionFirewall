@@ -7,8 +7,6 @@ import (
 
 const currencyCodeLength = 3
 
-// IsISOCurrency reports whether value is an ISO 4217 shaped alphabetic code:
-// exactly three uppercase letters.
 func IsISOCurrency(value string) bool {
 	if len(value) != currencyCodeLength {
 		return false

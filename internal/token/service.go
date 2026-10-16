@@ -32,9 +32,7 @@ type Options struct {
 	// other attempts before it is considered abandoned. Zero selects the
 	// default.
 	IssuanceTimeout time.Duration
-	// Logger receives operational events about failed reservations. Nil falls
-	// back to the default logger.
-	Logger *slog.Logger
+	Logger          *slog.Logger
 }
 
 func NewService(tokens ports.VirtualTokenRepository, issuer ports.VirtualCardIssuer, clock ports.Clock, options Options) *Service {
@@ -66,8 +64,7 @@ type keyedLock struct {
 }
 
 // lock serialises callers that share a key and releases the entry as soon as
-// the last one leaves, so the map stays bounded by concurrent users instead of
-// growing with every pair the process has ever issued a card for.
+// the last one leaves, so the map stays bounded by concurrent users.
 func (k *keyedMutex) lock(key string) func() {
 	k.mu.Lock()
 	if k.locks == nil {

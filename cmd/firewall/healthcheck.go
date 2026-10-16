@@ -10,9 +10,8 @@ import (
 
 const healthcheckTimeout = 2 * time.Second
 
-// runHealthcheck is used as the container HEALTHCHECK command: it reports the
-// process ready only when /readyz answers 2xx. Kept in the binary because the
-// production image (distroless) ships no shell or curl.
+// runHealthcheck is used as the container HEALTHCHECK command; it lives in the
+// binary because the distroless production image ships no shell or curl.
 func runHealthcheck() int {
 	target := "http://127.0.0.1" + addressPort(configuredAddress()) + "/readyz"
 	client := &http.Client{Timeout: healthcheckTimeout}
