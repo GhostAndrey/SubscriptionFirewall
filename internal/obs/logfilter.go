@@ -49,6 +49,14 @@ func (h *SanitizingHandler) WithGroup(name string) slog.Handler {
 }
 
 func (h *SanitizingHandler) sanitize(attr slog.Attr) slog.Attr {
+	if attr.Value.Kind() == slog.KindGroup {
+		group := attr.Value.Group()
+		nested := make([]slog.Attr, 0, len(group))
+		for _, inner := range group {
+			nested = append(nested, h.sanitize(inner))
+		}
+		return slog.GroupAttrs(attr.Key, nested...)
+	}
 	if sensitiveAttributeKeys[attr.Key] && attr.Value.Kind() == slog.KindString {
 		return slog.String(attr.Key, masking.Token(attr.Value.String()))
 	}

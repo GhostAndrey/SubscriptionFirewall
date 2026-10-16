@@ -52,7 +52,6 @@ func New(
 	}
 	p.runner = worker.New(worker.Options[ports.OutboxItem]{
 		Claim:               p.claimUntilOpen,
-		Complete:            outbox.Complete,
 		Process:             p.processItem,
 		Maintenance:         p.maintain,
 		MaintenanceInterval: time.Minute,

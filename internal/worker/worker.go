@@ -18,7 +18,6 @@ const (
 
 type Runner[T any] struct {
 	claim    func(ctx context.Context, limit int) ([]T, error)
-	complete func(ctx context.Context, ids []int64) error
 	process  func(ctx context.Context, item T)
 	maintain func(ctx context.Context)
 	name     string
@@ -33,9 +32,8 @@ type Runner[T any] struct {
 }
 
 type Options[T any] struct {
-	Claim    func(ctx context.Context, limit int) ([]T, error)
-	Complete func(ctx context.Context, ids []int64) error
-	Process  func(ctx context.Context, item T)
+	Claim   func(ctx context.Context, limit int) ([]T, error)
+	Process func(ctx context.Context, item T)
 	// Maintenance requeues stale entries and refreshes gauges; nil disables
 	// the maintenance loop.
 	Maintenance func(ctx context.Context)
@@ -54,7 +52,6 @@ func New[T any](options Options[T]) *Runner[T] {
 	}
 	return &Runner[T]{
 		claim:    options.Claim,
-		complete: options.Complete,
 		process:  options.Process,
 		maintain: options.Maintenance,
 		name:     options.Name,

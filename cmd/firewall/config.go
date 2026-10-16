@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -130,10 +131,23 @@ func loadConfig() (config, error) {
 	cfg.redisPassword = os.Getenv("SUBSCRIPTION_FIREWALL_REDIS_PASSWORD")
 	cfg.otlpEndpoint = os.Getenv("SUBSCRIPTION_FIREWALL_OTLP_ENDPOINT")
 
+	if err := validateRedisRateLimit(cfg); err != nil {
+		return cfg, err
+	}
 	if err := resolveStorage(&cfg); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// validateRedisRateLimit refuses a fractional limit when Redis is enabled: the
+// shared counter is an integer count per fixed window, so int() would truncate
+// the rate to zero and silently disable rate limiting entirely.
+func validateRedisRateLimit(cfg config) error {
+	if cfg.redisAddr == "" || cfg.rateLimit == math.Trunc(cfg.rateLimit) {
+		return nil
+	}
+	return fmt.Errorf("SUBSCRIPTION_FIREWALL_RATE_LIMIT must be a whole number of requests per second when SUBSCRIPTION_FIREWALL_REDIS_ADDR is set, got %v", cfg.rateLimit)
 }
 
 // resolveStorage settles the storage backend against the DSN: auto follows the

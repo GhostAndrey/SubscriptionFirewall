@@ -243,6 +243,32 @@ func TestLoadConfigAcceptsNonNegativeOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadConfigValidatesRateLimitAgainstRedis(t *testing.T) {
+	t.Run("fractional limit with redis is rejected", func(t *testing.T) {
+		t.Setenv("SUBSCRIPTION_FIREWALL_REDIS_ADDR", "127.0.0.1:6379")
+		t.Setenv("SUBSCRIPTION_FIREWALL_RATE_LIMIT", "0.5")
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("expected a fractional shared rate limit to be rejected")
+		}
+	})
+
+	t.Run("whole limit with redis is accepted", func(t *testing.T) {
+		t.Setenv("SUBSCRIPTION_FIREWALL_REDIS_ADDR", "127.0.0.1:6379")
+		t.Setenv("SUBSCRIPTION_FIREWALL_RATE_LIMIT", "5")
+		if _, err := loadConfig(); err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+	})
+
+	t.Run("fractional limit without redis is accepted", func(t *testing.T) {
+		t.Setenv("SUBSCRIPTION_FIREWALL_REDIS_ADDR", "")
+		t.Setenv("SUBSCRIPTION_FIREWALL_RATE_LIMIT", "0.5")
+		if _, err := loadConfig(); err != nil {
+			t.Fatalf("the in-process limiter supports fractions: %v", err)
+		}
+	})
+}
+
 func TestAddressPort(t *testing.T) {
 	tests := map[string]string{
 		":8080":                 ":8080",

@@ -7,7 +7,7 @@ import (
 )
 
 func TestAPIKeyScopes(t *testing.T) {
-	auth := newAPIKeyAuthenticator([]string{
+	auth := mustAPIKeyAuthenticator([]string{
 		"ingest-key:ingest",
 		"manage-key:manage,read",
 		"admin-key",
@@ -71,6 +71,19 @@ func TestAPIKeyScopes(t *testing.T) {
 				t.Fatalf("next handler called = %v, want %v", nextCalled, test.wantNext)
 			}
 		})
+	}
+}
+
+func TestRequiredScopeDefaultsToManageOutsideV1(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/admin/secret", nil)
+	if got := requiredScope(request); got != scopeManage {
+		t.Fatalf("requiredScope = %q, want %q", got, scopeManage)
+	}
+}
+
+func TestPublicPathIgnoresTrailingSlash(t *testing.T) {
+	if requiresAuth(httptest.NewRequest(http.MethodGet, "/healthz/", nil)) {
+		t.Error("/healthz/ must be treated as public")
 	}
 }
 

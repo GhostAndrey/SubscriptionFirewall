@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -37,7 +38,11 @@ type apiKeyAuthenticator struct {
 	keys []apiKey
 }
 
-func newAPIKeyAuthenticator(keys []string) *apiKeyAuthenticator {
+// newAPIKeyAuthenticator parses "key" or "key:scope,scope" entries. A named key
+// without any scope would silently never authorise anything, so it is rejected
+// instead of dropped; blank entries are ignored so a trailing comma in the
+// environment list stays harmless.
+func newAPIKeyAuthenticator(keys []string) (*apiKeyAuthenticator, error) {
 	parsed := make([]apiKey, 0, len(keys))
 	for _, entry := range keys {
 		entry = strings.TrimSpace(entry)
@@ -46,8 +51,8 @@ func newAPIKeyAuthenticator(keys []string) *apiKeyAuthenticator {
 		}
 		value, scopeList := entry, scopeFull
 		if valuePart, scopePart, found := strings.Cut(entry, ":"); found {
-			if strings.TrimSpace(valuePart) == "" {
-				continue
+			if valuePart = strings.TrimSpace(valuePart); valuePart == "" {
+				return nil, fmt.Errorf("api key entry %q has no key part", entry)
 			}
 			value, scopeList = valuePart, scopePart
 		}
@@ -58,11 +63,11 @@ func newAPIKeyAuthenticator(keys []string) *apiKeyAuthenticator {
 			}
 		}
 		if len(scopes) == 0 {
-			continue
+			return nil, fmt.Errorf("api key %q has no scopes", value)
 		}
 		parsed = append(parsed, apiKey{value: value, scopes: scopes})
 	}
-	return &apiKeyAuthenticator{keys: parsed}
+	return &apiKeyAuthenticator{keys: parsed}, nil
 }
 
 func (a *apiKeyAuthenticator) enabled() bool {
@@ -88,7 +93,7 @@ func (a *apiKeyAuthenticator) middleware(logger *slog.Logger, next http.Handler)
 			return
 		}
 
-		if scope := requiredScope(r); scope != "" && !key.allows(scope) {
+		if scope := requiredScope(r); !key.allows(scope) {
 			logger.Warn("forbidden request",
 				"method", r.Method,
 				"path", r.URL.Path,
@@ -133,13 +138,22 @@ var publicPaths = map[string]bool{
 	"/metrics": true,
 }
 
-func requiresAuth(r *http.Request) bool {
-	return !publicPaths[r.URL.Path]
+// isPublicPath ignores a trailing slash so every layer (auth, rate limiting and
+// tracing) agrees on which paths are unauthenticated.
+func isPublicPath(path string) bool {
+	return publicPaths[strings.TrimSuffix(path, "/")]
 }
 
+func requiresAuth(r *http.Request) bool {
+	return !isPublicPath(r.URL.Path)
+}
+
+// requiredScope defaults to the manage scope for anything outside /v1 so a
+// private path that is not explicitly classified still demands the strongest
+// scope instead of accepting any key.
 func requiredScope(r *http.Request) string {
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {
-		return ""
+		return scopeManage
 	}
 	switch {
 	case r.Method == http.MethodGet:

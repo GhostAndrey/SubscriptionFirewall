@@ -117,19 +117,18 @@ func (s *Service) ChangeSubscription(ctx context.Context, actor string, id domai
 	if err != nil {
 		return nil, err
 	}
-	s.writeAudit(ctx, actor, action, entitySubscription, string(id))
 
 	if changed.VirtualTokenID == "" {
-		s.count(action, entitySubscription, "applied")
+		s.recordAppliedOrigin(ctx, actor, action, entitySubscription, string(id))
 		return changed, nil
 	}
 	tokenID := domain.VirtualTokenID(changed.VirtualTokenID)
 	if _, err := s.applyToken(ctx, tokenID, action); err != nil {
-		return changed, s.handleCounterpartFailure(ctx, changeOf(changed), entityToken, string(tokenID), action, err)
+		return changed, s.finishCounterpartFailure(ctx, actor, action, changeOf(changed), entityToken, string(tokenID), err)
 	}
+	s.recordAppliedOrigin(ctx, actor, action, entitySubscription, string(id))
 	s.writeAudit(ctx, actor, action, entityToken, string(tokenID))
 	s.count(action, entityToken, "applied")
-	s.count(action, entitySubscription, "applied")
 	return changed, nil
 }
 
@@ -142,23 +141,22 @@ func (s *Service) ChangeToken(ctx context.Context, actor string, id domain.Virtu
 	if err != nil {
 		return nil, err
 	}
-	s.writeAudit(ctx, actor, action, entityToken, string(id))
 
 	linked, err := s.subscriptions.GetByUserAndMerchant(ctx, changed.UserID, changed.MerchantID)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
-		s.count(action, entityToken, "applied")
+		s.recordAppliedOrigin(ctx, actor, action, entityToken, string(id))
 		return changed, nil
 	case err != nil:
-		return changed, s.handleCounterpartFailure(ctx, changeOfToken(changed), entitySubscription, "", action, err)
+		return changed, s.finishCounterpartFailure(ctx, actor, action, changeOfToken(changed), entitySubscription, "", err)
 	}
 
 	if _, err := s.applySubscription(ctx, linked.ID, action); err != nil {
-		return changed, s.handleCounterpartFailure(ctx, changeOfToken(changed), entitySubscription, string(linked.ID), action, err)
+		return changed, s.finishCounterpartFailure(ctx, actor, action, changeOfToken(changed), entitySubscription, string(linked.ID), err)
 	}
+	s.recordAppliedOrigin(ctx, actor, action, entityToken, string(id))
 	s.writeAudit(ctx, actor, action, entitySubscription, string(linked.ID))
 	s.count(action, entitySubscription, "applied")
-	s.count(action, entityToken, "applied")
 	return changed, nil
 }
 
@@ -196,7 +194,7 @@ func validateAction(action Action) error {
 	return nil
 }
 
-// audit records an entry, downgrading a storage failure to a warning: losing
+// writeAudit records an entry, downgrading a storage failure to a warning: losing
 // the audit trail must not undo a transition that already reached both
 // entities.
 func (s *Service) writeAudit(ctx context.Context, actor string, action Action, entityType, entityID string) {
@@ -204,6 +202,33 @@ func (s *Service) writeAudit(ctx context.Context, actor string, action Action, e
 		s.logger.Warn("audit record failed",
 			"action", action, "entity_type", entityType, "entity_id", entityID, "error", err)
 	}
+}
+
+// recordAppliedOrigin audits an origin change once it is final, and counts it as
+// applied. Callers use it after the counterpart either succeeded or was
+// deferred, so a compensated (rolled back) change is never audited.
+func (s *Service) recordAppliedOrigin(ctx context.Context, actor string, action Action, entityType, entityID string) {
+	s.writeAudit(ctx, actor, action, entityType, entityID)
+	s.count(action, entityType, "applied")
+}
+
+// finishCounterpartFailure resolves a failed counterpart, then audits the
+// origin only when the change stands: a deferred irreversible action is final,
+// while a compensated reversible one was rolled back and must not be recorded.
+func (s *Service) finishCounterpartFailure(
+	ctx context.Context,
+	actor string,
+	action Action,
+	origin changeable,
+	targetEntity string,
+	counterpartID string,
+	cause error,
+) error {
+	err := s.handleCounterpartFailure(ctx, origin, targetEntity, counterpartID, action, cause)
+	if errors.Is(err, ErrSyncDeferred) {
+		s.recordAppliedOrigin(ctx, actor, action, origin.entityType(), origin.entityID())
+	}
+	return err
 }
 
 type changeable interface {
@@ -296,14 +321,18 @@ func (s *Service) ReplayTask(ctx context.Context, task ports.LifecycleSyncTask) 
 
 	switch task.EntityType {
 	case entityToken:
-		_, err := s.applyToken(ctx, domain.VirtualTokenID(task.EntityID), action)
-		return err
+		if _, err := s.applyToken(ctx, domain.VirtualTokenID(task.EntityID), action); err != nil {
+			return err
+		}
 	case entitySubscription:
-		_, err := s.applySubscription(ctx, domain.SubscriptionID(task.EntityID), action)
-		return err
+		if _, err := s.applySubscription(ctx, domain.SubscriptionID(task.EntityID), action); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown lifecycle entity type %q", task.EntityType)
 	}
+	s.recordAppliedOrigin(ctx, actorSystem, action, task.EntityType, task.EntityID)
+	return nil
 }
 
 func (s *Service) applySubscription(ctx context.Context, id domain.SubscriptionID, action Action) (*domain.Subscription, error) {

@@ -370,6 +370,53 @@ func TestReplayTaskIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestReplayTaskRecordsAudit(t *testing.T) {
+	h := newHarness(t, time.Now())
+	h.seedPair(t, domain.SubscriptionTerminated, domain.VirtualTokenActive)
+
+	if err := h.service.ReplayTask(t.Context(), tokenTask("vtok-1", ActionTerminate)); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+
+	entries := h.audit.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected one audit entry for the replayed task, got %+v", entries)
+	}
+	if entries[0].Actor != actorSystem || entries[0].EntityType != entityToken || entries[0].EntityID != "vtok-1" {
+		t.Fatalf("unexpected audit entry: %+v", entries[0])
+	}
+}
+
+func TestRolledBackChangeIsNotAudited(t *testing.T) {
+	h := newHarness(t, time.Now())
+	h.seedPair(t, domain.SubscriptionActive, domain.VirtualTokenTerminated)
+
+	if _, err := h.service.FreezeSubscription(t.Context(), "adm-key", "sub-1"); err == nil {
+		t.Fatal("expected the failed freeze to be reported")
+	}
+	if entries := h.audit.Entries(); len(entries) != 0 {
+		t.Fatalf("a rolled back change must not be audited, got %+v", entries)
+	}
+}
+
+func TestDeferredTerminationAuditsTheOrigin(t *testing.T) {
+	h := newHarness(t, time.Now())
+	subscription, _ := h.seedPair(t, domain.SubscriptionActive, domain.VirtualTokenActive)
+	subscription.VirtualTokenID = "vtok-missing"
+	if err := h.subscriptions.Save(t.Context(), subscription); err != nil {
+		t.Fatalf("save subscription: %v", err)
+	}
+
+	if _, err := h.service.TerminateSubscription(t.Context(), "adm-key", "sub-1"); !errors.Is(err, ErrSyncDeferred) {
+		t.Fatalf("expected ErrSyncDeferred, got %v", err)
+	}
+
+	entries := h.audit.Entries()
+	if len(entries) != 1 || entries[0].EntityType != entitySubscription || entries[0].EntityID != "sub-1" {
+		t.Fatalf("expected a subscription audit entry for the standing change, got %+v", entries)
+	}
+}
+
 func TestChangeRejectsUnknownAction(t *testing.T) {
 	h := newHarness(t, time.Now())
 	h.seedPair(t, domain.SubscriptionActive, domain.VirtualTokenActive)

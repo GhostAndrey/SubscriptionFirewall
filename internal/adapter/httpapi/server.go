@@ -3,9 +3,9 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -72,7 +72,10 @@ func NewServer(
 	metrics *obs.Metrics,
 	logger *slog.Logger,
 ) (*Server, error) {
-	authenticator := newAPIKeyAuthenticator(config.APIKeys)
+	authenticator, err := newAPIKeyAuthenticator(config.APIKeys)
+	if err != nil {
+		return nil, fmt.Errorf("httpapi: %w", err)
+	}
 	if !authenticator.enabled() && !config.AllowNoAuth {
 		return nil, errors.New("httpapi: no api keys configured; set APIKeys or AllowNoAuth")
 	}
@@ -137,7 +140,7 @@ func NewServer(
 	if config.Tracing {
 		instrumented = otelhttp.NewHandler(mux, "http",
 			otelhttp.WithFilter(func(request *http.Request) bool {
-				return !publicPaths[strings.TrimSuffix(request.URL.Path, "/")]
+				return !isPublicPath(request.URL.Path)
 			}),
 		)
 	}
@@ -159,10 +162,7 @@ func NewServer(
 
 func (s *Server) ListenAndServe() error {
 	s.logger.Info("http server listening", "address", s.http.Addr)
-	if err := s.http.ListenAndServe(); err != nil {
-		return err
-	}
-	return nil
+	return s.http.ListenAndServe()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

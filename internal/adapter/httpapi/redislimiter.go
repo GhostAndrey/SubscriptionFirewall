@@ -48,7 +48,7 @@ func newRedisRateLimiter(client *redis.Client, limit, burst int, logger *slog.Lo
 
 func (l *redisRateLimiter) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if publicPaths[r.URL.Path] {
+		if isPublicPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

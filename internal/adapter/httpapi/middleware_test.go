@@ -183,7 +183,7 @@ func TestObservationMiddlewareRecoversAndStillRecords(t *testing.T) {
 }
 
 func TestAPIKeyMatchesIgnoresLengthDifferences(t *testing.T) {
-	auth := newAPIKeyAuthenticator([]string{"short", "a-much-longer-key-value"})
+	auth := mustAPIKeyAuthenticator([]string{"short", "a-much-longer-key-value"})
 
 	for _, candidate := range []string{"", "s", "short", "short-extra", "a-much-longer-key-value", "a-much-longer-key-value-x"} {
 		if _, matched := auth.matches(candidate); matched != (candidate == "short" || candidate == "a-much-longer-key-value") {
@@ -205,7 +205,7 @@ func TestAPIKeyDigestIsFixedSize(t *testing.T) {
 }
 
 func TestAPIKeyMatchesPrefersTheLastMatchingKey(t *testing.T) {
-	auth := newAPIKeyAuthenticator([]string{"dup:read", "dup:manage"})
+	auth := mustAPIKeyAuthenticator([]string{"dup:read", "dup:manage"})
 
 	key, matched := auth.matches("dup")
 	if !matched {

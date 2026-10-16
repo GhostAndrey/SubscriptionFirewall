@@ -59,6 +59,64 @@ func TestMemoryOutboxLifecycle(t *testing.T) {
 	}
 }
 
+func TestMemoryOutboxRetriesFailedJobThenParksIt(t *testing.T) {
+	transactions := NewTransactionRepository()
+	outbox := NewDetectionOutbox(
+		transactions,
+		obs.NewMetrics(prometheus.NewRegistry()),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		16,
+	)
+	ctx := context.Background()
+
+	transaction := domain.Transaction{
+		ID: "tx-1", UserID: "user-1", MerchantID: "netflix", MerchantName: "Netflix",
+		MCC: domain.MCCRecurringBilling, AmountMinor: 1500, Currency: "USD",
+		AuthorizedAt: time.Now(),
+	}
+	if err := outbox.EnqueueWithTransaction(ctx, transaction); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	items, err := outbox.ClaimBatch(ctx, 8)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("claim: %+v (%v)", items, err)
+	}
+	if err := outbox.Fail(ctx, items[0]); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+
+	retry, err := outbox.ClaimBatch(ctx, 8)
+	if err != nil || len(retry) != 1 || retry[0].UserID != "user-1" {
+		t.Fatalf("a failed job must return to the queue, got %+v (%v)", retry, err)
+	}
+	if retry[0].Attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", retry[0].Attempts)
+	}
+
+	last := retry[0]
+	for last.Attempts < maxDetectionAttempts-1 {
+		if err := outbox.Fail(ctx, last); err != nil {
+			t.Fatalf("fail: %v", err)
+		}
+		claimed, err := outbox.ClaimBatch(ctx, 8)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("expected a retry before the budget is spent, got %+v (%v)", claimed, err)
+		}
+		last = claimed[0]
+	}
+	if err := outbox.Fail(ctx, last); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+
+	emptyContext, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	parked, err := outbox.ClaimBatch(emptyContext, 8)
+	if !errors.Is(err, context.DeadlineExceeded) || len(parked) != 0 {
+		t.Fatalf("expected the exhausted job to be parked, got %+v (%v)", parked, err)
+	}
+}
+
 func TestMemoryOutboxClose(t *testing.T) {
 	outbox := NewDetectionOutbox(
 		NewTransactionRepository(),

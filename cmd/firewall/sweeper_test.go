@@ -150,6 +150,50 @@ func TestSweepPassMarksOverdueSubscriptionsZombie(t *testing.T) {
 	}
 }
 
+func TestSweeperSweepsImmediatelyOnStart(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repository := memory.NewSubscriptionRepository()
+	now := time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)
+
+	overdue, err := domain.NewSubscription(
+		"sub-overdue", "user-1", "netflix", "Netflix", domain.SubscriptionActive,
+		domain.WindowMonthly, 1500, "USD", now.Add(-90*24*time.Hour), 3)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := repository.Save(context.Background(), overdue); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	subs := subscription.NewService(repository, fixedNow{now: now})
+	tokens := token.NewService(
+		memory.NewVirtualTokenRepository(),
+		issuer.NewSimulatedCardIssuer(10_000),
+		fixedNow{now: now},
+		token.Options{Logger: logger},
+	)
+	// An hour-long interval means only the immediate pass can run within the test.
+	sweeper := newSubscriptionSweeper(
+		nil, subs,
+		lifecycle.NewService(subs, tokens, lifecycle.Options{Queue: memory.NewLifecycleSyncQueue(), Logger: logger}),
+		obs.NewMetrics(prometheus.NewRegistry()),
+		logger,
+		time.Hour,
+	)
+	sweeper.start(context.Background())
+	t.Cleanup(sweeper.stop)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		persisted, err := repository.GetByID(context.Background(), "sub-overdue")
+		if err == nil && persisted.State == domain.SubscriptionZombie {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected the first sweep to run immediately on start")
+}
+
 // fixedNow is a clock the test controls, so the sweep sees deterministic ages.
 type fixedNow struct{ now time.Time }
 

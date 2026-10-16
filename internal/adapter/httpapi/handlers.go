@@ -67,7 +67,7 @@ func pageParams(r *http.Request) (limit, offset int, err error) {
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		limit, err = strconv.Atoi(raw)
 		if err != nil || limit < 1 || limit > maxPageSize {
-			return 0, 0, errors.New("limit must be between 1 and 200")
+			return 0, 0, fmt.Errorf("limit must be between 1 and %d", maxPageSize)
 		}
 	}
 	if raw := r.URL.Query().Get("offset"); raw != "" {

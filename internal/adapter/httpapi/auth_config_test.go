@@ -83,6 +83,19 @@ func TestNewServerRefusesToStartWithoutKeys(t *testing.T) {
 	}
 }
 
+func TestNewServerRejectsKeysWithoutScopes(t *testing.T) {
+	for name, key := range map[string]string{
+		"empty scope list": "key-without-scopes:",
+		"blank key part":   ":read",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := buildServer(t, Config{APIKeys: []string{key}}); err == nil {
+				t.Fatalf("expected %q to be rejected at startup", key)
+			}
+		})
+	}
+}
+
 func TestNewServerStartsWithAllowNoAuth(t *testing.T) {
 	server, err := buildServer(t, Config{AllowNoAuth: true})
 	if err != nil {

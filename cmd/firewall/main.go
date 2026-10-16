@@ -16,8 +16,9 @@ import (
 	"subscriptionfirewall/internal/obs"
 )
 
+// defaultAddress is the listen address used when SUBSCRIPTION_FIREWALL_ADDRESS
+// is unset or cannot be parsed.
 const defaultAddress = ":8080"
-const defaultPort = ":8080"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
@@ -63,7 +64,7 @@ func run() error {
 	application.start(applicationContext, cfg)
 
 	apiServer, err := httpapi.NewServer(
-		httpConfig(cfg, clock, readinessOf(application)),
+		httpConfig(cfg, clock, application.readiness),
 		application.subscriptions,
 		application.tokens,
 		application.lifecycle,
@@ -109,8 +110,4 @@ func shutdownTracingOnExit(shutdownTracing func(context.Context) error, timeout 
 	if err := shutdownTracing(shutdownContext); err != nil {
 		logger.Error("tracer provider shutdown failed", "error", err)
 	}
-}
-
-func readinessOf(application *services) func(ctx context.Context) error {
-	return application.readiness
 }

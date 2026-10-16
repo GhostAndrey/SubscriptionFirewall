@@ -12,7 +12,8 @@ func TestPANMasksEverythingButPrefixAndSuffix(t *testing.T) {
 		"short pan":      {input: "1234", want: "****"},
 		"empty pan":      {input: "", want: "****"},
 		"non digit pan":  {input: "not-a-pan", want: "****"},
-		"minimum length": {input: "4111111234", want: "4111111234"},
+		"minimum length": {input: "4111111234", want: "****"},
+		"one above min":  {input: "41111112345", want: "411111*2345"},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

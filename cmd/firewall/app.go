@@ -158,10 +158,10 @@ func configuredAddress() string {
 func addressPort(address string) string {
 	_, port, err := net.SplitHostPort(address)
 	if err != nil {
-		return defaultPort
+		return defaultAddress
 	}
 	if parsed, err := strconv.Atoi(port); err != nil || parsed <= 0 || parsed > 65535 {
-		return defaultPort
+		return defaultAddress
 	}
 	return ":" + port
 }

@@ -130,6 +130,30 @@ func TestSanitizingHandlerWithGroupKeepsWorking(t *testing.T) {
 	}
 }
 
+func TestSanitizingHandlerMasksNestedGroups(t *testing.T) {
+	logger, capture := capturingLogger()
+
+	logger.Info("nested", slog.Group("payment",
+		slog.String("pan", "4111111111111111"),
+		slog.Group("card", slog.String("token", "vtok-abcdef123456")),
+	))
+
+	payment, ok := capture.last(t)["payment"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a group attribute, got %v", capture.last(t)["payment"])
+	}
+	if pan, _ := payment["pan"].(string); strings.Contains(pan, "4111111111111111") {
+		t.Errorf("nested pan leaked: %q", pan)
+	}
+	card, ok := payment["card"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected the nested group, got %v", payment["card"])
+	}
+	if token, _ := card["token"].(string); strings.Contains(token, "vtok-abcdef123456") {
+		t.Errorf("double-nested token leaked: %q", token)
+	}
+}
+
 func TestSetupTracingDisabledWithoutEndpoint(t *testing.T) {
 	shutdown, err := SetupTracing(context.Background(), "", true)
 	if err != nil {

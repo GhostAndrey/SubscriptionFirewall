@@ -14,11 +14,20 @@ import (
 	"subscriptionfirewall/internal/ports"
 )
 
+const maxDetectionAttempts = 8
+
+// queuedJob carries the retry count alongside the user so Fail can park a job
+// that keeps failing instead of hot-looping it through the worker forever.
+type queuedJob struct {
+	userID   domain.UserID
+	attempts int
+}
+
 type DetectionOutbox struct {
 	transactions ports.TransactionRepository
 	metrics      *obs.Metrics
 	logger       *slog.Logger
-	jobs         chan domain.UserID
+	jobs         chan queuedJob
 
 	mu     sync.Mutex
 	closed bool
@@ -35,7 +44,7 @@ func NewDetectionOutbox(
 		transactions: transactions,
 		metrics:      metrics,
 		logger:       logger,
-		jobs:         make(chan domain.UserID, capacity),
+		jobs:         make(chan queuedJob, capacity),
 	}
 }
 
@@ -58,7 +67,7 @@ func (o *DetectionOutbox) EnqueueWithTransaction(ctx context.Context, transactio
 	}
 
 	select {
-	case o.jobs <- transaction.UserID:
+	case o.jobs <- queuedJob{userID: transaction.UserID}:
 	default:
 		o.metrics.CountEnqueueDropped()
 		o.logger.Warn("detection queue full, user dropped", "user_id", string(transaction.UserID))
@@ -72,14 +81,14 @@ func (o *DetectionOutbox) ClaimBatch(ctx context.Context, limit int) ([]ports.Ou
 	items := make([]ports.OutboxItem, 0, limit)
 	for len(items) < limit {
 		select {
-		case userID, ok := <-o.jobs:
+		case job, ok := <-o.jobs:
 			if !ok {
 				if len(items) > 0 {
 					return items, nil
 				}
 				return nil, ports.ErrOutboxClosed
 			}
-			items = append(items, o.newItem(userID))
+			items = append(items, o.newItem(job))
 		default:
 			if len(items) > 0 {
 				return items, nil
@@ -96,24 +105,49 @@ func (o *DetectionOutbox) claimBlocking(ctx context.Context, items []ports.Outbo
 	select {
 	case <-ctx.Done():
 		return items, ctx.Err()
-	case userID, ok := <-o.jobs:
+	case job, ok := <-o.jobs:
 		if !ok {
 			if len(items) > 0 {
 				return items, nil
 			}
 			return nil, ports.ErrOutboxClosed
 		}
-		return append(items, o.newItem(userID)), nil
+		return append(items, o.newItem(job)), nil
 	}
 }
 
-func (o *DetectionOutbox) newItem(userID domain.UserID) ports.OutboxItem {
-	return ports.OutboxItem{ID: o.nextID.Add(1), UserID: userID}
+func (o *DetectionOutbox) newItem(job queuedJob) ports.OutboxItem {
+	return ports.OutboxItem{ID: o.nextID.Add(1), UserID: job.userID, Attempts: job.attempts}
 }
 
 func (o *DetectionOutbox) Complete(_ context.Context, _ []int64) error { return nil }
 
-func (o *DetectionOutbox) Fail(_ context.Context, _ ports.OutboxItem) error { return nil }
+// Fail requeues the user until the retry budget is exhausted, so a transient
+// detection failure is retried within the process instead of being dropped on
+// the floor. Once the budget is spent the job is parked and reported, matching
+// the MySQL adapter's behaviour.
+func (o *DetectionOutbox) Fail(_ context.Context, item ports.OutboxItem) error {
+	if item.Attempts+1 >= maxDetectionAttempts {
+		o.metrics.CountEnqueueDropped()
+		o.logger.Warn("detection job exhausted retries, user dropped",
+			"user_id", string(item.UserID), "attempts", item.Attempts)
+		return nil
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		return ports.ErrOutboxClosed
+	}
+
+	select {
+	case o.jobs <- queuedJob{userID: item.UserID, attempts: item.Attempts + 1}:
+	default:
+		o.metrics.CountEnqueueDropped()
+		o.logger.Warn("detection queue full, retry dropped", "user_id", string(item.UserID))
+	}
+	return nil
+}
 
 func (o *DetectionOutbox) RequeueStale(_ context.Context, _ time.Duration) (int64, error) {
 	return 0, nil

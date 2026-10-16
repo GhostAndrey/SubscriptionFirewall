@@ -82,6 +82,10 @@ func (s *subscriptionSweeper) loop(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
+	// Sweep once on start so a restart does not wait a full interval before
+	// the first pass; overdue subscriptions would otherwise stay active.
+	s.sweepOnce(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():

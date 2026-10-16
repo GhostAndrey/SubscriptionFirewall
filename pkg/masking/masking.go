@@ -12,7 +12,9 @@ const (
 
 func PAN(pan string) string {
 	digits := strings.Map(keepDigit, pan)
-	if len(digits) < minimumPANLength {
+	// At or below the prefix+suffix length there is nothing left to hide, so
+	// mask everything rather than echo the whole value back.
+	if len(digits) <= minimumPANLength {
 		return "****"
 	}
 	return digits[:unmaskedPANPrefixLength] +

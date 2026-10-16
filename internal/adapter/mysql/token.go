@@ -227,7 +227,8 @@ func (r *VirtualTokenRepository) CompleteTokenIssuance(
 	}
 	result, err := r.db.ExecContext(ctx,
 		`UPDATE virtual_tokens
-		 SET masked_pan = ?, monthly_limit = ?, currency = ?, state = ?, period_started = ?, issuance_key = NULL
+		 SET masked_pan = ?, monthly_limit = ?, currency = ?, state = ?, period_started = ?,
+		     issuance_key = NULL, version = version + 1
 		 WHERE id = ? AND state = ? AND issuance_key = ?`,
 		token.Snapshot().MaskedPAN, token.Snapshot().MonthlyLimit, token.Snapshot().Currency,
 		token.Snapshot().State, now.UTC(), tokenID, domain.VirtualTokenIssuing, issuanceKey,

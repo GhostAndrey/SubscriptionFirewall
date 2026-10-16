@@ -13,6 +13,16 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// mustAPIKeyAuthenticator builds an authenticator for tests that use a valid
+// key configuration; it fails the test loudly on a configuration error.
+func mustAPIKeyAuthenticator(keys []string) *apiKeyAuthenticator {
+	authenticator, err := newAPIKeyAuthenticator(keys)
+	if err != nil {
+		panic(err)
+	}
+	return authenticator
+}
+
 func TestAPIKeyMiddleware(t *testing.T) {
 	const (
 		validKey   = "secret-key-1"
@@ -26,38 +36,38 @@ func TestAPIKeyMiddleware(t *testing.T) {
 		wantNext      bool
 	}{
 		"disabled authenticator lets requests through": {
-			authenticator: newAPIKeyAuthenticator(nil),
+			authenticator: mustAPIKeyAuthenticator(nil),
 			wantStatus:    http.StatusOK,
 			wantNext:      true,
 		},
 		"blank key configuration is treated as disabled": {
-			authenticator: newAPIKeyAuthenticator([]string{"", "   "}),
+			authenticator: mustAPIKeyAuthenticator([]string{"", "   "}),
 			wantStatus:    http.StatusOK,
 			wantNext:      true,
 		},
 		"missing key is rejected": {
-			authenticator: newAPIKeyAuthenticator([]string{validKey}),
+			authenticator: mustAPIKeyAuthenticator([]string{validKey}),
 			wantStatus:    http.StatusUnauthorized,
 		},
 		"wrong key is rejected": {
-			authenticator: newAPIKeyAuthenticator([]string{validKey}),
+			authenticator: mustAPIKeyAuthenticator([]string{validKey}),
 			headers:       map[string]string{"X-API-Key": invalidKey},
 			wantStatus:    http.StatusUnauthorized,
 		},
 		"valid key via X-API-Key header passes": {
-			authenticator: newAPIKeyAuthenticator([]string{validKey}),
+			authenticator: mustAPIKeyAuthenticator([]string{validKey}),
 			headers:       map[string]string{"X-API-Key": validKey},
 			wantStatus:    http.StatusOK,
 			wantNext:      true,
 		},
 		"valid key via Authorization header passes": {
-			authenticator: newAPIKeyAuthenticator([]string{validKey, "other-key"}),
+			authenticator: mustAPIKeyAuthenticator([]string{validKey, "other-key"}),
 			headers:       map[string]string{"Authorization": "Bearer other-key"},
 			wantStatus:    http.StatusOK,
 			wantNext:      true,
 		},
 		"authorization header without bearer prefix is rejected": {
-			authenticator: newAPIKeyAuthenticator([]string{validKey}),
+			authenticator: mustAPIKeyAuthenticator([]string{validKey}),
 			headers:       map[string]string{"Authorization": validKey},
 			wantStatus:    http.StatusUnauthorized,
 		},

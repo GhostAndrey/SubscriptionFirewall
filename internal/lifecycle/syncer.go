@@ -30,7 +30,6 @@ func NewSyncer(service *Service, queue ports.LifecycleSyncQueue, metrics *obs.Me
 	}
 	syncer.runner = worker.New(worker.Options[ports.LifecycleSyncTask]{
 		Claim:               queue.ClaimBatch,
-		Complete:            queue.Complete,
 		Process:             syncer.processTask,
 		Maintenance:         syncer.maintain,
 		MaintenanceInterval: time.Minute,
