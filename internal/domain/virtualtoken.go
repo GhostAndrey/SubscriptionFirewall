@@ -75,9 +75,14 @@ func NewIssuingVirtualToken(id VirtualTokenID, userID UserID, merchantID Merchan
 	}
 }
 
+// CompleteIssuance records the card returned by the provider for a reservation
+// that has not been provisioned yet. A reservation an operator moved out of
+// Issuing while the provider call was in flight (Frozen or Terminated) keeps
+// that state: the issued card is recorded instead of being lost, but the token
+// is never silently revived to Active.
 func (t *VirtualToken) CompleteIssuance(maskedPAN string, monthlyLimit int64, currency string, now time.Time) error {
-	if t.State != VirtualTokenIssuing {
-		return fmt.Errorf("cannot complete issuance of token %s in state %s: %w", t.ID, t.State, ErrInvalidTransition)
+	if t.MaskedPAN != "" {
+		return fmt.Errorf("token %s is already provisioned: %w", t.ID, ErrInvalidTransition)
 	}
 	if strings.TrimSpace(maskedPAN) == "" {
 		return fmt.Errorf("masked PAN is required: %w", ErrInvalidTransition)
@@ -91,7 +96,9 @@ func (t *VirtualToken) CompleteIssuance(maskedPAN string, monthlyLimit int64, cu
 	t.MaskedPAN = maskedPAN
 	t.MonthlyLimit = monthlyLimit
 	t.Currency = currency
-	t.State = VirtualTokenActive
+	if t.State == VirtualTokenIssuing {
+		t.State = VirtualTokenActive
+	}
 	t.PeriodStarted = now
 	return nil
 }
@@ -126,12 +133,15 @@ func (t *VirtualToken) ApplyCharge(amountMinor int64, currency string, now time.
 	return nil
 }
 
+// Freeze stops a card from charging. A reservation still being provisioned may
+// be frozen too, so an operator freeze that lands during issuance is honoured
+// rather than failing until the provider returns.
 func (t *VirtualToken) Freeze() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	switch t.State {
-	case VirtualTokenActive:
+	case VirtualTokenActive, VirtualTokenIssuing:
 		t.State = VirtualTokenFrozen
 		return nil
 	case VirtualTokenFrozen:

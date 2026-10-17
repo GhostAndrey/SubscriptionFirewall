@@ -180,6 +180,74 @@ func TestCompleteTokenIssuanceRejectsAForeignIssuanceKey(t *testing.T) {
 	}
 }
 
+func TestCompleteTokenIssuanceKeepsOperatorState(t *testing.T) {
+	db := testDB(t)
+	repository := NewVirtualTokenRepository(db)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	reservation, err := repository.ReserveTokenIssuance(ctx, "user-frozen", "netflix", "issue:user-frozen:netflix", now, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if !reservation.Reserved {
+		t.Fatal("expected the reservation to be granted")
+	}
+
+	frozen, err := repository.GetByID(ctx, reservation.TokenID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if err := frozen.Freeze(); err != nil {
+		t.Fatalf("freeze an in-flight reservation: %v", err)
+	}
+	if err := repository.UpdateVersion(ctx, frozen); err != nil {
+		t.Fatalf("persist freeze: %v", err)
+	}
+
+	completed, err := repository.CompleteTokenIssuance(ctx, reservation.TokenID, "issue:user-frozen:netflix",
+		ports.IssuedCard{MaskedPAN: "411111******1234", MonthlyLimit: 10_000, Currency: "USD"}, now)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if completed.State != domain.VirtualTokenFrozen {
+		t.Errorf("state = %s, want Frozen", completed.State)
+	}
+	if completed.MaskedPAN != "411111******1234" {
+		t.Errorf("card not recorded: %+v", completed.Snapshot())
+	}
+}
+
+func TestReleaseTokenIssuanceDropsAnUnprovisionedReservation(t *testing.T) {
+	db := testDB(t)
+	repository := NewVirtualTokenRepository(db)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	reservation, err := repository.ReserveTokenIssuance(ctx, "user-release", "netflix", "issue:user-release:netflix", now, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+
+	frozen, err := repository.GetByID(ctx, reservation.TokenID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if err := frozen.Freeze(); err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if err := repository.UpdateVersion(ctx, frozen); err != nil {
+		t.Fatalf("persist freeze: %v", err)
+	}
+
+	if err := repository.ReleaseTokenIssuance(ctx, reservation.TokenID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := repository.GetByID(ctx, reservation.TokenID); !isNotFound(err) {
+		t.Fatalf("a reservation that never got a card must be dropped, got %v", err)
+	}
+}
+
 func TestLifecycleSyncClaimHandlesAFullBatch(t *testing.T) {
 	db := testDB(t)
 	queue := NewLifecycleSyncQueue(db)

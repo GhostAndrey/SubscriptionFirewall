@@ -211,6 +211,11 @@ func (r *VirtualTokenRepository) ReserveTokenIssuance(
 	return ports.TokenReservation{Reserved: false, TokenID: existing.ID, Existing: existing}, nil
 }
 
+// CompleteTokenIssuance records the card returned by the provider. The card is
+// promoted to Active only while the row is still Issuing; a state an operator
+// set during provisioning (Frozen, Terminated) is preserved, so the issued card
+// is recorded without overwriting the operator's decision. The row is only
+// touched while this caller still holds the issuance key.
 func (r *VirtualTokenRepository) CompleteTokenIssuance(
 	ctx context.Context,
 	tokenID domain.VirtualTokenID,
@@ -227,11 +232,13 @@ func (r *VirtualTokenRepository) CompleteTokenIssuance(
 	}
 	result, err := r.db.ExecContext(ctx,
 		`UPDATE virtual_tokens
-		 SET masked_pan = ?, monthly_limit = ?, currency = ?, state = ?, period_started = ?,
-		     issuance_key = NULL, version = version + 1
-		 WHERE id = ? AND state = ? AND issuance_key = ?`,
-		token.Snapshot().MaskedPAN, token.Snapshot().MonthlyLimit, token.Snapshot().Currency,
-		token.Snapshot().State, now.UTC(), tokenID, domain.VirtualTokenIssuing, issuanceKey,
+		 SET masked_pan = ?, monthly_limit = ?, currency = ?,
+		     state = CASE WHEN state = ? THEN ? ELSE state END,
+		     period_started = ?, issuance_key = NULL, version = version + 1
+		 WHERE id = ? AND issuance_key = ?`,
+		card.MaskedPAN, card.MonthlyLimit, card.Currency,
+		domain.VirtualTokenIssuing, domain.VirtualTokenActive,
+		now.UTC(), tokenID, issuanceKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("complete virtual token issuance %s: %w", tokenID, err)
@@ -244,14 +251,16 @@ func (r *VirtualTokenRepository) CompleteTokenIssuance(
 		return nil, fmt.Errorf("virtual token %s no longer holds issuance %s: %w",
 			tokenID, issuanceKey, ports.ErrIssuanceLost)
 	}
-	token.AdmitVersion(token.CurrentVersion() + 1)
-	return token, nil
+	return r.GetByID(ctx, tokenID)
 }
 
+// ReleaseTokenIssuance drops a reservation that never received a card, whatever
+// state an operator moved it to while the provider call was in flight. A token
+// that already carries a card is never deleted.
 func (r *VirtualTokenRepository) ReleaseTokenIssuance(ctx context.Context, tokenID domain.VirtualTokenID) error {
 	if _, err := r.db.ExecContext(ctx,
-		`DELETE FROM virtual_tokens WHERE id = ? AND state = ?`,
-		tokenID, domain.VirtualTokenIssuing,
+		`DELETE FROM virtual_tokens WHERE id = ? AND masked_pan = ''`,
+		tokenID,
 	); err != nil {
 		return fmt.Errorf("release virtual token issuance %s: %w", tokenID, err)
 	}

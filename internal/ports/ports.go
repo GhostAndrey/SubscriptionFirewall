@@ -110,8 +110,11 @@ type VirtualTokenRepository interface {
 		now time.Time,
 		staleBefore time.Time,
 	) (TokenReservation, error)
-	// CompleteTokenIssuance promotes a reservation to an active card. It fails
-	// with ErrIssuanceLost when the reservation is no longer held.
+	// CompleteTokenIssuance records the card returned by the provider for a
+	// held reservation. It fails with ErrIssuanceLost when the reservation is no
+	// longer held. A reservation an operator moved out of Issuing keeps its
+	// state, so the card is recorded without reviving a frozen or terminated
+	// token back to Active.
 	CompleteTokenIssuance(
 		ctx context.Context,
 		tokenID domain.VirtualTokenID,
@@ -119,8 +122,9 @@ type VirtualTokenRepository interface {
 		card IssuedCard,
 		now time.Time,
 	) (*domain.VirtualToken, error)
-	// ReleaseTokenIssuance drops an unfinished reservation so that a later
-	// attempt can provision the card.
+	// ReleaseTokenIssuance drops a reservation that never received a card, so a
+	// later attempt can provision the card. A token that already carries a card
+	// is left untouched.
 	ReleaseTokenIssuance(ctx context.Context, tokenID domain.VirtualTokenID) error
 }
 

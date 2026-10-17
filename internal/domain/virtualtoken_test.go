@@ -189,6 +189,55 @@ func TestCompleteIssuance(t *testing.T) {
 			t.Fatalf("expected ErrInvalidTransition, got %v", err)
 		}
 	})
+
+	t.Run("records the card of a reservation frozen while issuing", func(t *testing.T) {
+		token := NewIssuingVirtualToken("vtok-1", "user-1", "netflix", now)
+		if err := token.Freeze(); err != nil {
+			t.Fatalf("freeze an in-flight reservation: %v", err)
+		}
+		if err := token.CompleteIssuance("411111******1234", 25_000, "EUR", now.Add(time.Minute)); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+		snapshot := token.Snapshot()
+		if snapshot.State != VirtualTokenFrozen {
+			t.Errorf("state = %s, want Frozen: the operator decision must stand", snapshot.State)
+		}
+		if snapshot.MaskedPAN != "411111******1234" {
+			t.Errorf("card data not recorded: %+v", snapshot)
+		}
+	})
+
+	t.Run("records the card of a reservation terminated while issuing", func(t *testing.T) {
+		token := NewIssuingVirtualToken("vtok-1", "user-1", "netflix", now)
+		if err := token.Terminate(); err != nil {
+			t.Fatalf("terminate an in-flight reservation: %v", err)
+		}
+		if err := token.CompleteIssuance("411111******1234", 25_000, "EUR", now.Add(time.Minute)); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+		snapshot := token.Snapshot()
+		if snapshot.State != VirtualTokenTerminated {
+			t.Errorf("state = %s, want Terminated", snapshot.State)
+		}
+		if snapshot.MaskedPAN != "411111******1234" {
+			t.Errorf("card data not recorded: %+v", snapshot)
+		}
+	})
+}
+
+func TestFreezeStopsAnInFlightReservation(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	token := NewIssuingVirtualToken("vtok-1", "user-1", "netflix", now)
+
+	if err := token.Freeze(); err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if token.State != VirtualTokenFrozen {
+		t.Fatalf("state = %s, want Frozen", token.State)
+	}
+	if err := token.AuthorizeCharge(100, "USD", now); !errors.Is(err, ErrTokenNotActive) {
+		t.Fatalf("a frozen reservation must not authorize charges, got %v", err)
+	}
 }
 
 func TestNewVirtualTokenRejectsUnusableCard(t *testing.T) {
