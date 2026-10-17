@@ -53,9 +53,9 @@ SUBSCRIPTION_FIREWALL_API_KEYS=local-dev-key make docker-run
 
 ## Аутентификация и скоупы
 
-Все эндпоинты, кроме `GET /healthz` и `GET /metrics`, требуют API-ключ в заголовке `X-API-Key` или `Authorization: Bearer <key>`.
+Все эндпоинты, кроме `GET /healthz`, `GET /readyz`, `GET /version` и `GET /metrics`, требуют API-ключ в заголовке `X-API-Key` или `Authorization: Bearer <key>`.
 
-Формат ключей: `ключ:скоуп1,скоуп2`; ключ без скоупов имеет полный доступ. Скоупы:
+Формат ключей: `ключ` (полный доступ) или `ключ:скоуп1,скоуп2`. Запись с пустым ключом или пустым списком скоупов (`:read`, `ключ:`) останавливает старт с ошибкой, а не отбрасывается молча. Скоупы:
 
 - `ingest` — инжест транзакций (`POST /v1/transactions`);
 - `read` — все GET-эндпоинты;
@@ -64,13 +64,15 @@ SUBSCRIPTION_FIREWALL_API_KEYS=local-dev-key make docker-run
 
 Запрос с валидным ключом без нужного скоупа получает `403`. Сравнение ключей выполняется за константное время.
 
+Публичные пути распознаются с учётом завершающего слэша (`/healthz/` тоже без auth), и одна и та же проверка используется в auth, rate limit и трейсинге. Приватный путь вне `/v1` требует скоуп `manage`, а не проходит с любым ключом.
+
 ```bash
 curl -H "X-API-Key: local-dev-key" http://localhost:8080/v1/users/user-1/subscriptions
 ```
 
 ## Гарантии обработки
 
-Инжест транзакции и постановка задачи детекции пишутся в одной SQL-транзакции (таблица `detection_outbox`). Воркеры разбирают очередь через `SELECT ... FOR UPDATE SKIP LOCKED`, так что несколько реплик не обрабатывают одну задачу дважды; упавшая задача переигрывается (детекция идемпотентна), после 8 попыток уходит в статус `failed`. Задачи зависших воркеров возвращает maintenance-цикл. `freezes`/`reactivates`/`terminates` пишутся в `audit_log` с маскированным ключом-актором — по записи на каждую из двух сущностей.
+Инжест транзакции и постановка задачи детекции пишутся в одной SQL-транзакции (таблица `detection_outbox`). Воркеры разбирают очередь через `SELECT ... FOR UPDATE SKIP LOCKED`, так что несколько реплик не обрабатывают одну задачу дважды; упавшая задача переигрывается (детекция идемпотентна), после 8 попыток уходит в статус `failed`. Задачи зависших воркеров возвращает maintenance-цикл. `freezes`/`reactivates`/`terminates` пишутся в `audit_log` с маскированным ключом-актором — по записи на каждую из двух сущностей, и только когда переход по паре применён окончательно: откатанная попытка в аудит не попадает, а доигранный сикером переход — попадает.
 
 Сервис спроектирован для нескольких реплик за общей MySQL:
 
@@ -102,7 +104,7 @@ curl -H "X-API-Key: local-dev-key" http://localhost:8080/v1/users/user-1/subscri
 | `SUBSCRIPTION_FIREWALL_ISSUER` | `simulated` | Эмитент виртуальных карт. Сейчас доступен только `simulated` — заглушка, непригодная для продакшена; при старте пишет предупреждение |
 | `SUBSCRIPTION_FIREWALL_WORKERS` | `4` | Воркеры детекции |
 | `SUBSCRIPTION_FIREWALL_QUEUE_CAPACITY` | `1024` | Ёмкость очереди детекции |
-| `SUBSCRIPTION_FIREWALL_SWEEP_INTERVAL` | `1m` | Период sweep-джа зомби |
+| `SUBSCRIPTION_FIREWALL_SWEEP_INTERVAL` | `1m` | Период sweep-джа зомби; первый проход выполняется сразу при старте |
 | `SUBSCRIPTION_FIREWALL_ISSUER_MONTHLY_LIMIT` | `100000` | Месячный лимит карты (minor units) |
 | `SUBSCRIPTION_FIREWALL_DB_DSN` | — | DSN MySQL; без переменной — in-memory хранилище |
 | `SUBSCRIPTION_FIREWALL_DB_MAX_OPEN_CONNS` | `16` | Максимум открытых соединений с БД |
@@ -113,7 +115,7 @@ curl -H "X-API-Key: local-dev-key" http://localhost:8080/v1/users/user-1/subscri
 | `SUBSCRIPTION_FIREWALL_WRITE_TIMEOUT` | `10s` | HTTP write timeout |
 | `SUBSCRIPTION_FIREWALL_IDLE_TIMEOUT` | `10s` | Простой keep-alive соединения; пусто или `0` — берётся `READ_TIMEOUT` |
 | `SUBSCRIPTION_FIREWALL_SHUTDOWN_TIMEOUT` | `10s` | Таймаут graceful shutdown |
-| `SUBSCRIPTION_FIREWALL_RATE_LIMIT` | `100` | Запросов в секунду на клиентский IP (0 — выключить) |
+| `SUBSCRIPTION_FIREWALL_RATE_LIMIT` | `100` | Запросов в секунду на клиентский IP (0 — выключить); при заданном Redis значение должно быть целым |
 | `SUBSCRIPTION_FIREWALL_RATE_BURST` | `200` | Допустимый burst сверх лимита (in-memory limiter) |
 | `SUBSCRIPTION_FIREWALL_REDIS_ADDR` | — | Адрес Redis; при заданном rate limit общий для всех реплик |
 | `SUBSCRIPTION_FIREWALL_REDIS_PASSWORD` | — | Пароль Redis (если требуется) |
@@ -174,7 +176,7 @@ curl -H "X-API-Key: local-dev-key" http://localhost:8080/v1/users/user-1/subscri
 
 - **In-memory хранилище рассчитано ровно на одну реплику.** Данные не переживают рестарт, а блокировки репозиториев живут только в процессе: вторая реплика получит свой мир и разъедется с первой без единой ошибки. При старте без DSN сервис пишет об этом предупреждение. Для нескольких реплик нужен MySQL — он и есть единственный режим с реальными гарантиями.
 - Эмитент карт — заглушка `SimulatedCardIssuer`, выбирается через `SUBSCRIPTION_FIREWALL_ISSUER`. Для продакшена нужен реальный адаптер: порт `ports.VirtualCardIssuer`, подключение в `buildCardIssuer`. Сервис выдачи гарантирует один вызов провайдера на пару (user, merchant) и передаёт стабильный `IdempotencyKey`, который провайдер может использовать для дедупликации.
-- Очередь детекции in-memory без БД теряет задачи при рестарте (dev-режим); с MySQL — outbox с гарантией at-least-once.
+- Очередь детекции in-memory без БД не переживает рестарт (dev-режим): упавшая задача переигрывается в процессе до 8 попыток, но после перезапуска очередь пуста; с MySQL — outbox с гарантией at-least-once.
 - Пагинация выполняется в SQL, но ответ остаётся массивом без метаданных: клиент не узнает общий объём выборки и не может перескочить на последнюю страницу одним запросом.
 - Rate limit по IP берётся из `RemoteAddr`: за обратным прокси все клиенты делят один адрес. Redis-лимитер общий для реплик; при недоступности Redis запросы чтения и управления проходят без лимита (fail-open), а `POST /v1/tokens/{id}/authorize` получает `503` — списание денег без счётчика не проходит.
 - Трейс-контекст не распространяется из HTTP-запроса в задачу outbox: спаны детекции не связаны со спаном инжеста (корреляция по `user_id` и request-id в логах).
