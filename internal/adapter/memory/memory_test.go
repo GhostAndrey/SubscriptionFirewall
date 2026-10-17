@@ -242,6 +242,69 @@ func TestTokenIssuanceReservationIsExclusive(t *testing.T) {
 	}
 }
 
+func TestCompleteTokenIssuanceKeepsOperatorState(t *testing.T) {
+	ctx := context.Background()
+	repository := NewVirtualTokenRepository()
+	now := time.Now()
+
+	reservation, err := repository.ReserveTokenIssuance(ctx, "user-1", "netflix", "issue:user-1:netflix", now, now.Add(-time.Minute))
+	if err != nil || !reservation.Reserved {
+		t.Fatalf("reserve: %+v (%v)", reservation, err)
+	}
+
+	frozen, err := repository.GetByID(ctx, reservation.TokenID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if err := frozen.Freeze(); err != nil {
+		t.Fatalf("freeze an in-flight reservation: %v", err)
+	}
+	if err := repository.UpdateVersion(ctx, frozen); err != nil {
+		t.Fatalf("persist freeze: %v", err)
+	}
+
+	completed, err := repository.CompleteTokenIssuance(ctx, reservation.TokenID, "issue:user-1:netflix",
+		ports.IssuedCard{MaskedPAN: "411111******1234", MonthlyLimit: 10_000, Currency: "USD"}, now)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if completed.State != domain.VirtualTokenFrozen {
+		t.Errorf("state = %s, want Frozen", completed.State)
+	}
+	if completed.MaskedPAN != "411111******1234" {
+		t.Errorf("card not recorded: %+v", completed.Snapshot())
+	}
+}
+
+func TestReleaseTokenIssuanceDropsAnUnprovisionedReservation(t *testing.T) {
+	ctx := context.Background()
+	repository := NewVirtualTokenRepository()
+	now := time.Now()
+
+	reservation, err := repository.ReserveTokenIssuance(ctx, "user-1", "netflix", "issue:user-1:netflix", now, now.Add(-time.Minute))
+	if err != nil || !reservation.Reserved {
+		t.Fatalf("reserve: %+v (%v)", reservation, err)
+	}
+
+	frozen, err := repository.GetByID(ctx, reservation.TokenID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if err := frozen.Freeze(); err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	if err := repository.UpdateVersion(ctx, frozen); err != nil {
+		t.Fatalf("persist freeze: %v", err)
+	}
+
+	if err := repository.ReleaseTokenIssuance(ctx, reservation.TokenID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := repository.GetByID(ctx, reservation.TokenID); !isNotFoundErr(err) {
+		t.Fatalf("a reservation that never got a card must be dropped, got %v", err)
+	}
+}
+
 func TestTokenIssuanceReservationReclaimsStaleWork(t *testing.T) {
 	ctx := context.Background()
 	repository := NewVirtualTokenRepository()

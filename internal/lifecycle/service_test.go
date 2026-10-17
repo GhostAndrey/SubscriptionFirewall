@@ -230,6 +230,42 @@ func TestTerminateDefersCounterpartInsteadOfCompensating(t *testing.T) {
 	}
 }
 
+func TestFreezeDuringIssuanceFreezesBothEntities(t *testing.T) {
+	h := newHarness(t, time.Now())
+	ctx := t.Context()
+
+	reservation := domain.NewIssuingVirtualToken("vtok-issuing", "user-1", "netflix", h.clock())
+	if err := h.tokens.Save(ctx, reservation); err != nil {
+		t.Fatalf("save reservation: %v", err)
+	}
+	subscription, err := domain.NewSubscription("sub-1", "user-1", "netflix", "Netflix",
+		domain.SubscriptionActive, domain.WindowMonthly, 1500, "USD", h.clock().Add(-24*time.Hour), 3)
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	subscription.VirtualTokenID = "vtok-issuing"
+	if err := h.subscriptions.Save(ctx, subscription); err != nil {
+		t.Fatalf("save subscription: %v", err)
+	}
+
+	if _, err := h.service.FreezeSubscription(ctx, "adm-key", "sub-1"); err != nil {
+		t.Fatalf("freeze a subscription whose card is still being issued: %v", err)
+	}
+
+	persistedSubscription, err := h.subscriptions.GetByID(ctx, "sub-1")
+	if err != nil {
+		t.Fatalf("load subscription: %v", err)
+	}
+	persistedToken, err := h.tokens.GetByID(ctx, "vtok-issuing")
+	if err != nil {
+		t.Fatalf("load token: %v", err)
+	}
+	if persistedSubscription.State != domain.SubscriptionFrozen || persistedToken.State != domain.VirtualTokenFrozen {
+		t.Fatalf("expected both Frozen, got subscription=%s token=%s",
+			persistedSubscription.State, persistedToken.State)
+	}
+}
+
 func TestSyncZombieFreezesCard(t *testing.T) {
 	h := newHarness(t, time.Now())
 	subscription, _ := h.seedPair(t, domain.SubscriptionActive, domain.VirtualTokenActive)

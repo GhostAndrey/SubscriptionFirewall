@@ -287,6 +287,43 @@ func TestEnsureTokenReportsConcurrentIssuance(t *testing.T) {
 	}
 }
 
+// freezingIssuer freezes the in-flight reservation through the repository
+// before returning the card, which is what an operator freeze does while the
+// provider call is still running.
+type freezingIssuer struct {
+	repository *memory.VirtualTokenRepository
+}
+
+func (f freezingIssuer) Issue(ctx context.Context, _ ports.IssueRequest) (ports.IssuedCard, error) {
+	token, err := f.repository.FindByUserAndMerchant(ctx, "user-1", "netflix")
+	if err != nil {
+		return ports.IssuedCard{}, err
+	}
+	if err := token.Freeze(); err != nil {
+		return ports.IssuedCard{}, err
+	}
+	if err := f.repository.UpdateVersion(ctx, token); err != nil {
+		return ports.IssuedCard{}, err
+	}
+	return ports.IssuedCard{MaskedPAN: "411111******1234", MonthlyLimit: 10_000, Currency: "USD"}, nil
+}
+
+func TestEnsureTokenRecordsACardFrozenMidIssuance(t *testing.T) {
+	repository := memory.NewVirtualTokenRepository()
+	service := newService(t, repository, freezingIssuer{repository: repository}, time.Now())
+
+	token, err := service.EnsureToken(context.Background(), "user-1", "netflix")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if token.State != domain.VirtualTokenFrozen {
+		t.Fatalf("state = %s, want Frozen: the freeze must survive the provider call", token.State)
+	}
+	if token.MaskedPAN == "" {
+		t.Fatalf("the issued card must be recorded, got %+v", token.Snapshot())
+	}
+}
+
 type scriptedIssuer struct {
 	err   error
 	calls atomic.Int32

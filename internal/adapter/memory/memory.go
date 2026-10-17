@@ -457,7 +457,7 @@ func (r *VirtualTokenRepository) ReleaseTokenIssuance(_ context.Context, tokenID
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if stored, ok := r.tokens[tokenID]; ok && stored.State == domain.VirtualTokenIssuing {
+	if stored, ok := r.tokens[tokenID]; ok && stored.MaskedPAN == "" {
 		delete(r.tokens, tokenID)
 	}
 	return nil
