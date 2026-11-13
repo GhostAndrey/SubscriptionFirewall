@@ -973,6 +973,17 @@ func TestLifecycleSyncQueueRoundTrip(t *testing.T) {
 	if err := queue.Complete(ctx, []int64{retried[0].ID}); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
+	if pending, err := queue.PendingCount(ctx); err != nil || pending != 1 {
+		t.Fatalf("a complete from a worker whose lease expired must not touch the requeued row, got %d (%v)", pending, err)
+	}
+
+	claimedAgain, err := queue.ClaimBatch(ctx, 10)
+	if err != nil || len(claimedAgain) != 1 {
+		t.Fatalf("expected the requeued task to be claimable, got %+v (%v)", claimedAgain, err)
+	}
+	if err := queue.Complete(ctx, []int64{claimedAgain[0].ID}); err != nil {
+		t.Fatalf("complete after a fresh claim: %v", err)
+	}
 	if pending, err := queue.PendingCount(ctx); err != nil || pending != 0 {
 		t.Fatalf("expected the queue to drain, got %d (%v)", pending, err)
 	}
