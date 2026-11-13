@@ -36,6 +36,7 @@ type TransactionRepository interface {
 	// before pulling their transaction history into memory.
 	ListRecurringMerchantCandidates(ctx context.Context, userID domain.UserID, since time.Time, minOccurrences int) ([]MerchantChargeCount, error)
 	ListByUserAndMerchants(ctx context.Context, userID domain.UserID, merchants []domain.MerchantID, since time.Time) ([]domain.Transaction, error)
+	DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
 type MerchantChargeCount struct {
@@ -169,6 +170,7 @@ type DetectionOutbox interface {
 
 	RequeueStale(ctx context.Context, olderThan time.Duration) (int64, error)
 	PendingCount(ctx context.Context) (int64, error)
+	DeleteFinished(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
 type AuditEntry struct {
@@ -180,6 +182,7 @@ type AuditEntry struct {
 
 type AuditLog interface {
 	Record(ctx context.Context, entry AuditEntry) error
+	DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error)
 }
 
 // LifecycleSyncTask is a deferred action that could not be applied to the
@@ -202,4 +205,5 @@ type LifecycleSyncQueue interface {
 	Fail(ctx context.Context, task LifecycleSyncTask) error
 	RequeueStale(ctx context.Context, olderThan time.Duration) (int64, error)
 	PendingCount(ctx context.Context) (int64, error)
+	DeleteFinished(ctx context.Context, olderThan time.Duration) (int64, error)
 }

@@ -109,7 +109,7 @@ func (o *Outbox) Complete(ctx context.Context, ids []int64) error {
 	}
 	_, err := o.db.ExecContext(ctx,
 		`UPDATE detection_outbox SET status = 'done', updated_at = ?
-		 WHERE id IN (`+placeholders(len(ids))+`)`,
+		 WHERE id IN (`+placeholders(len(ids))+`) AND status = 'processing'`,
 		append([]any{time.Now().UTC()}, int64SliceToAny(ids)...)...)
 	if err != nil {
 		return fmt.Errorf("complete outbox items: %w", err)
@@ -123,8 +123,8 @@ func (o *Outbox) Fail(ctx context.Context, item ports.OutboxItem) error {
 		status = "failed"
 	}
 	if _, err := o.db.ExecContext(ctx,
-		`UPDATE detection_outbox SET status = ?, updated_at = ? WHERE id = ?`,
-		status, time.Now().UTC(), item.ID); err != nil {
+		`UPDATE detection_outbox SET status = ?, updated_at = ? WHERE id = ? AND attempts = ?`,
+		status, time.Now().UTC(), item.ID, item.Attempts); err != nil {
 		return fmt.Errorf("fail outbox item %d: %w", item.ID, err)
 	}
 	return nil
@@ -132,9 +132,10 @@ func (o *Outbox) Fail(ctx context.Context, item ports.OutboxItem) error {
 
 func (o *Outbox) RequeueStale(ctx context.Context, olderThan time.Duration) (int64, error) {
 	result, err := o.db.ExecContext(ctx,
-		`UPDATE detection_outbox SET status = 'pending', updated_at = ?
+		`UPDATE detection_outbox
+		 SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END, updated_at = ?
 		 WHERE status = 'processing' AND updated_at < ?`,
-		time.Now().UTC(), time.Now().UTC().Add(-olderThan))
+		maxOutboxAttempts, time.Now().UTC(), time.Now().UTC().Add(-olderThan))
 	if err != nil {
 		return 0, fmt.Errorf("requeue stale outbox items: %w", err)
 	}
@@ -152,6 +153,22 @@ func (o *Outbox) PendingCount(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("count pending outbox items: %w", err)
 	}
 	return count, nil
+}
+
+func (o *Outbox) DeleteFinished(ctx context.Context, olderThan time.Duration) (int64, error) {
+	result, err := o.db.ExecContext(ctx,
+		`DELETE FROM detection_outbox
+		 WHERE status IN ('done', 'failed') AND updated_at < ?
+		 LIMIT 1000`,
+		time.Now().UTC().Add(-olderThan))
+	if err != nil {
+		return 0, fmt.Errorf("delete finished outbox items: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count deleted outbox items: %w", err)
+	}
+	return deleted, nil
 }
 
 var _ ports.DetectionOutbox = (*Outbox)(nil)
@@ -172,6 +189,20 @@ func (a *AuditLog) Record(ctx context.Context, entry ports.AuditEntry) error {
 		return fmt.Errorf("record audit entry: %w", err)
 	}
 	return nil
+}
+
+func (a *AuditLog) DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error) {
+	result, err := a.db.ExecContext(ctx,
+		`DELETE FROM audit_log WHERE created_at < ? LIMIT 1000`,
+		time.Now().UTC().Add(-olderThan))
+	if err != nil {
+		return 0, fmt.Errorf("delete old audit entries: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count deleted audit entries: %w", err)
+	}
+	return deleted, nil
 }
 
 var _ ports.AuditLog = (*AuditLog)(nil)

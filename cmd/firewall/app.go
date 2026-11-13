@@ -91,10 +91,18 @@ func build(
 		Metrics: metrics,
 		Logger:  logger,
 	})
-	assembled.syncer = lifecycle.NewSyncer(assembled.lifecycle, storage.lifecycleQueue, metrics, logger)
-	assembled.pipeline = pipeline.New(storage.outbox, assembled.detector, assembled.subscriptions, assembled.tokens, metrics, logger)
+	assembled.syncer = lifecycle.NewSyncer(assembled.lifecycle, storage.lifecycleQueue, metrics, logger, cfg.outboxRetention)
+	assembled.pipeline = pipeline.New(storage.outbox, assembled.detector, assembled.subscriptions, assembled.tokens, metrics, logger, cfg.outboxRetention)
 	assembled.sweeper = newSubscriptionSweeper(
-		storage.database, assembled.subscriptions, assembled.lifecycle, metrics, logger, cfg.sweepInterval)
+		storage.database, assembled.subscriptions, assembled.lifecycle,
+		&historyPruner{
+			transactions:         storage.transactions,
+			audit:                storage.audit,
+			transactionRetention: cfg.transactionRetention,
+			auditRetention:       cfg.auditRetention,
+			logger:               logger,
+		},
+		metrics, logger, cfg.sweepInterval)
 	return assembled, nil
 }
 
@@ -138,6 +146,7 @@ func httpConfig(cfg config, clock ports.Clock, readiness func(ctx context.Contex
 		AllowNoAuth:     cfg.allowNoAuth,
 		RateLimit:       cfg.rateLimit,
 		RateBurst:       cfg.rateBurst,
+		TrustedProxies:  cfg.trustedProxies,
 		Clock:           clock,
 		Readiness:       readiness,
 		Tracing:         cfg.otlpEndpoint != "",

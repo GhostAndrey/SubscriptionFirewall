@@ -40,6 +40,7 @@ func TestPipelineDetectsAndStopsGracefully(t *testing.T) {
 		tokenService,
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
+		0,
 	)
 
 	pipelineService.Start(context.Background(), 2)

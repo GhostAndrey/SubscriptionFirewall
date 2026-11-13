@@ -57,6 +57,7 @@ func TestShutdownDoesNotReportTheClosedQueueAsAFailure(t *testing.T) {
 		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		logger,
+		0,
 	)
 
 	// The queue is closed before the workers are cancelled, so a worker that is
@@ -80,7 +81,9 @@ func TestClaimTranslatesTheClosedQueueSentinel(t *testing.T) {
 		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
+		0,
 	)
+
 	outbox.Close()
 
 	_, err := service.claimUntilOpen(context.Background(), 4)
@@ -99,6 +102,7 @@ func TestClaimPassesThroughStorageErrors(t *testing.T) {
 		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
+		0,
 	)
 
 	_, err := service.claimUntilOpen(context.Background(), 4)
@@ -128,6 +132,7 @@ func TestStopIsSafeWithoutStart(t *testing.T) {
 		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
+		0,
 	)
 
 	done := make(chan struct{})

@@ -108,7 +108,7 @@ func (q *LifecycleSyncQueue) Complete(ctx context.Context, ids []int64) error {
 	}
 	if _, err := q.db.ExecContext(ctx,
 		`UPDATE lifecycle_sync_outbox SET status = 'done', updated_at = ?
-		 WHERE id IN (`+placeholders(len(ids))+`)`,
+		 WHERE id IN (`+placeholders(len(ids))+`) AND status = 'processing'`,
 		append([]any{time.Now().UTC()}, int64SliceToAny(ids)...)...,
 	); err != nil {
 		return fmt.Errorf("complete lifecycle syncs: %w", err)
@@ -122,8 +122,8 @@ func (q *LifecycleSyncQueue) Fail(ctx context.Context, task ports.LifecycleSyncT
 		status = "failed"
 	}
 	if _, err := q.db.ExecContext(ctx,
-		`UPDATE lifecycle_sync_outbox SET status = ?, updated_at = ? WHERE id = ?`,
-		status, time.Now().UTC(), task.ID,
+		`UPDATE lifecycle_sync_outbox SET status = ?, updated_at = ? WHERE id = ? AND attempts = ?`,
+		status, time.Now().UTC(), task.ID, task.Attempts,
 	); err != nil {
 		return fmt.Errorf("fail lifecycle sync %d: %w", task.ID, err)
 	}
@@ -132,9 +132,10 @@ func (q *LifecycleSyncQueue) Fail(ctx context.Context, task ports.LifecycleSyncT
 
 func (q *LifecycleSyncQueue) RequeueStale(ctx context.Context, olderThan time.Duration) (int64, error) {
 	result, err := q.db.ExecContext(ctx,
-		`UPDATE lifecycle_sync_outbox SET status = 'pending', updated_at = ?
+		`UPDATE lifecycle_sync_outbox
+		 SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END, updated_at = ?
 		 WHERE status = 'processing' AND updated_at < ?`,
-		time.Now().UTC(), time.Now().UTC().Add(-olderThan),
+		maxLifecycleSyncAttempts, time.Now().UTC(), time.Now().UTC().Add(-olderThan),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("requeue stale lifecycle syncs: %w", err)
@@ -153,6 +154,22 @@ func (q *LifecycleSyncQueue) PendingCount(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("count pending lifecycle syncs: %w", err)
 	}
 	return count, nil
+}
+
+func (q *LifecycleSyncQueue) DeleteFinished(ctx context.Context, olderThan time.Duration) (int64, error) {
+	result, err := q.db.ExecContext(ctx,
+		`DELETE FROM lifecycle_sync_outbox
+		 WHERE status IN ('done', 'failed') AND updated_at < ?
+		 LIMIT 1000`,
+		time.Now().UTC().Add(-olderThan))
+	if err != nil {
+		return 0, fmt.Errorf("delete finished lifecycle syncs: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count deleted lifecycle syncs: %w", err)
+	}
+	return deleted, nil
 }
 
 var _ ports.LifecycleSyncQueue = (*LifecycleSyncQueue)(nil)

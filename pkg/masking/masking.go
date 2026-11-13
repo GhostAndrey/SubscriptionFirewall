@@ -7,7 +7,8 @@ const (
 	unmaskedPANSuffixLength = 4
 	minimumPANLength        = unmaskedPANPrefixLength + unmaskedPANSuffixLength
 	unmaskedTokenChunk      = 4
-	minimumTokenLength      = 2 * unmaskedTokenChunk
+	unmaskedTokenHidden     = 4
+	minimumTokenLength      = 2*unmaskedTokenChunk + unmaskedTokenHidden
 )
 
 func PAN(pan string) string {
@@ -23,7 +24,7 @@ func PAN(pan string) string {
 }
 
 func Token(token string) string {
-	if len(token) < minimumTokenLength {
+	if len(token) <= minimumTokenLength {
 		return "****"
 	}
 	return token[:unmaskedTokenChunk] + "…" + token[len(token)-unmaskedTokenChunk:]

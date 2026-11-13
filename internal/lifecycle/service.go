@@ -199,6 +199,9 @@ func validateAction(action Action) error {
 // entities.
 func (s *Service) writeAudit(ctx context.Context, actor string, action Action, entityType, entityID string) {
 	if err := s.record(ctx, actor, action, entityType, entityID); err != nil {
+		if s.metrics != nil {
+			s.metrics.CountAuditWriteFailure()
+		}
 		s.logger.Warn("audit record failed",
 			"action", action, "entity_type", entityType, "entity_id", entityID, "error", err)
 	}

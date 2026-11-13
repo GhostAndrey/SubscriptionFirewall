@@ -13,33 +13,16 @@ import (
 func TestNewRedisRateLimiterRequiresLimit(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:0"})
 
-	if limiter := newRedisRateLimiter(client, 0, 100, testLogger()); limiter != nil {
+	if limiter := newRedisRateLimiter(client, 0, testLogger(), clientIPResolver{}); limiter != nil {
 		t.Error("a disabled limit must not build a limiter")
 	}
-	if limiter := newRedisRateLimiter(nil, 100, 100, testLogger()); limiter != nil {
+	if limiter := newRedisRateLimiter(nil, 100, testLogger(), clientIPResolver{}); limiter != nil {
 		t.Error("a nil client must not build a limiter")
 	}
 }
 
-func TestNewRedisRateLimiterKeepsBurstAtLeastLimit(t *testing.T) {
-	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:0"})
-
-	limiter := newRedisRateLimiter(client, 100, 10, testLogger())
-	if limiter == nil {
-		t.Fatal("expected a limiter")
-	}
-	if limiter.burst != 100 {
-		t.Errorf("burst = %d, want it raised to the limit of 100", limiter.burst)
-	}
-
-	exact := newRedisRateLimiter(client, 100, 250, testLogger())
-	if exact.burst != 250 {
-		t.Errorf("burst = %d, want 250", exact.burst)
-	}
-}
-
 func TestRedisRateLimiterFailsClosedOnAuthorizeWhenRedisIsDown(t *testing.T) {
-	limiter := newRedisRateLimiter(unreachableRedis(t), 100, 200, testLogger())
+	limiter := newRedisRateLimiter(unreachableRedis(t), 100, testLogger(), clientIPResolver{})
 	handler := limiter.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("the handler must not run while the rate limiter is unavailable")
 	}))
@@ -56,7 +39,7 @@ func TestRedisRateLimiterFailsClosedOnAuthorizeWhenRedisIsDown(t *testing.T) {
 
 func TestRedisRateLimiterFailsOpenOnReadsWhenRedisIsDown(t *testing.T) {
 	reached := false
-	limiter := newRedisRateLimiter(unreachableRedis(t), 100, 200, testLogger())
+	limiter := newRedisRateLimiter(unreachableRedis(t), 100, testLogger(), clientIPResolver{})
 	handler := limiter.middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		reached = true
 		w.WriteHeader(http.StatusOK)
@@ -78,7 +61,7 @@ func TestRedisRateLimiterFailsOpenOnReadsWhenRedisIsDown(t *testing.T) {
 
 func TestRedisRateLimiterSkipsPublicPaths(t *testing.T) {
 	reached := false
-	limiter := newRedisRateLimiter(unreachableRedis(t), 100, 200, testLogger())
+	limiter := newRedisRateLimiter(unreachableRedis(t), 100, testLogger(), clientIPResolver{})
 	handler := limiter.middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		reached = true
 		w.WriteHeader(http.StatusOK)

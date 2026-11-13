@@ -20,7 +20,7 @@ func TestSyncerReplaysDeferredTask(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	syncer := NewSyncer(h.service, h.queue, h.metrics, discardLogger())
+	syncer := NewSyncer(h.service, h.queue, h.metrics, discardLogger(), 0)
 	syncer.Start(t.Context(), 1)
 	t.Cleanup(syncer.Stop)
 
@@ -43,7 +43,7 @@ func TestSyncerRetriesFailedTaskWithoutLosingIt(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	syncer := NewSyncer(h.service, h.queue, h.metrics, discardLogger())
+	syncer := NewSyncer(h.service, h.queue, h.metrics, discardLogger(), 0)
 	syncer.Start(t.Context(), 1)
 	t.Cleanup(syncer.Stop)
 
@@ -60,7 +60,7 @@ func TestSyncerRetriesFailedTaskWithoutLosingIt(t *testing.T) {
 func TestSyncerStopIsIdempotent(t *testing.T) {
 	h := newHarness(t, time.Now())
 
-	syncer := NewSyncer(h.service, h.queue, h.metrics, discardLogger())
+	syncer := NewSyncer(h.service, h.queue, h.metrics, discardLogger(), 0)
 	syncer.Start(t.Context(), 2)
 	syncer.Stop()
 	syncer.Stop()

@@ -88,7 +88,7 @@ func TestPublicPathIgnoresTrailingSlash(t *testing.T) {
 }
 
 func TestRateLimitMiddleware(t *testing.T) {
-	limiter := newIPRateLimiter(1, 1)
+	limiter := newIPRateLimiter(1, 1, clientIPResolver{})
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

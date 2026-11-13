@@ -152,3 +152,32 @@ func TestServerRoutesRequireAPIKey(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIKeyFromRequestParsesBearerCaseInsensitively(t *testing.T) {
+	tests := map[string]struct {
+		header string
+		want   string
+	}{
+		"canonical scheme":       {header: "Bearer key-1", want: "key-1"},
+		"lowercase scheme":       {header: "bearer key-1", want: "key-1"},
+		"uppercase scheme":       {header: "BEARER key-1", want: "key-1"},
+		"extra whitespace":       {header: "Bearer  key-1", want: "key-1"},
+		"tab separator":          {header: "Bearer\tkey-1", want: "key-1"},
+		"another scheme":         {header: "Basic key-1", want: ""},
+		"scheme without token":   {header: "Bearer", want: ""},
+		"scheme with blank body": {header: "Bearer ", want: ""},
+		"empty header":           {header: "", want: ""},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/v1/subscriptions/sub-1", nil)
+			if test.header != "" {
+				request.Header.Set("Authorization", test.header)
+			}
+			if got := apiKeyFromRequest(request); got != test.want {
+				t.Errorf("apiKeyFromRequest(%q) = %q, want %q", test.header, got, test.want)
+			}
+		})
+	}
+}

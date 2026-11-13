@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"sort"
 	"time"
 
 	"subscriptionfirewall/internal/domain"
@@ -19,6 +18,8 @@ type Config struct {
 	AnalysisHorizon    time.Duration
 	MinimumOccurrences int
 	AmountTolerance    float64
+	IntervalTolerance  float64
+	MinimumInterval    time.Duration
 	TrialDuration      time.Duration
 }
 
@@ -27,6 +28,8 @@ func DefaultConfig() Config {
 		AnalysisHorizon:    365 * 24 * time.Hour,
 		MinimumOccurrences: 3,
 		AmountTolerance:    0.05,
+		IntervalTolerance:  0.5,
+		MinimumInterval:    3 * 24 * time.Hour,
 		TrialDuration:      14 * 24 * time.Hour,
 	}
 }
@@ -73,8 +76,8 @@ func (d *Detector) Detect(ctx context.Context, userID domain.UserID) ([]domain.D
 			detections = append(detections, detection)
 		}
 	}
-	sort.Slice(detections, func(i, j int) bool {
-		return detections[i].LastChargedAt.After(detections[j].LastChargedAt)
+	slices.SortFunc(detections, func(a, b domain.DetectedSubscription) int {
+		return b.LastChargedAt.Compare(a.LastChargedAt)
 	})
 	return detections, nil
 }
@@ -101,6 +104,12 @@ func (d *Detector) detectRecurring(userID domain.UserID, merchantID domain.Merch
 
 	medianInterval, ok := medianInterval(merchantTransactions)
 	if !ok {
+		return domain.DetectedSubscription{}, false
+	}
+	if d.isTooFrequent(last.MCC, medianInterval) {
+		return domain.DetectedSubscription{}, false
+	}
+	if !intervalsAreRegular(merchantTransactions, medianInterval, d.config.IntervalTolerance) {
 		return domain.DetectedSubscription{}, false
 	}
 	window, ok := windowFromMedianInterval(medianInterval)
@@ -146,6 +155,13 @@ func (d *Detector) requiredOccurrences(mcc domain.MCC) int {
 	return d.config.MinimumOccurrences
 }
 
+func (d *Detector) isTooFrequent(mcc domain.MCC, medianInterval time.Duration) bool {
+	if mcc.IsSubscriptionProne() {
+		return false
+	}
+	return d.config.MinimumInterval > 0 && medianInterval < d.config.MinimumInterval
+}
+
 // groupByMerchant buckets a user's transactions per merchant. Each bucket is
 // sorted by authorization time, because the interval and window rules read the
 // first and last charge of the bucket as its boundaries.
@@ -170,9 +186,30 @@ func medianInterval(transactions []domain.Transaction) (time.Duration, bool) {
 	for i := 1; i < len(transactions); i++ {
 		intervals = append(intervals, transactions[i].AuthorizedAt.Sub(transactions[i-1].AuthorizedAt))
 	}
-	sort.Slice(intervals, func(i, j int) bool { return intervals[i] < intervals[j] })
-	return intervals[len(intervals)/2], true
+	slices.Sort(intervals)
+	middle := len(intervals) / 2
+	if len(intervals)%2 == 1 {
+		return intervals[middle], true
+	}
+	return (intervals[middle-1] + intervals[middle]) / 2, true
 }
+
+func intervalsAreRegular(transactions []domain.Transaction, medianInterval time.Duration, tolerance float64) bool {
+	if tolerance < 0 {
+		tolerance = 0
+	}
+	lower := time.Duration(float64(medianInterval) * (1 - tolerance))
+	upper := time.Duration(float64(medianInterval) * (1 + tolerance))
+	for i := 1; i < len(transactions); i++ {
+		interval := transactions[i].AuthorizedAt.Sub(transactions[i-1].AuthorizedAt)
+		if interval < lower || interval > upper {
+			return false
+		}
+	}
+	return true
+}
+
+const yearlyWindowLowerBound = 180 * 24 * time.Hour
 
 func windowFromMedianInterval(interval time.Duration) (domain.BillingWindow, bool) {
 	switch {
@@ -182,7 +219,7 @@ func windowFromMedianInterval(interval time.Duration) (domain.BillingWindow, boo
 		return domain.WindowWeekly, true
 	case interval <= 32*24*time.Hour:
 		return domain.WindowMonthly, true
-	case interval <= 370*24*time.Hour:
+	case interval >= yearlyWindowLowerBound && interval <= 370*24*time.Hour:
 		return domain.WindowYearly, true
 	default:
 		return "", false

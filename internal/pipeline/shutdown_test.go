@@ -46,7 +46,9 @@ func TestStopDrainsQueuedUsers(t *testing.T) {
 		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
+		0,
 	)
+
 	pipelineService.Start(context.Background(), 2)
 	pipelineService.Stop()
 
@@ -69,6 +71,7 @@ func TestStopIsIdempotentAndOutboxRejectsAfterStop(t *testing.T) {
 		token.NewService(memory.NewVirtualTokenRepository(), stubIssuer{}, memory.Clock{}, token.Options{}),
 		obs.NewMetrics(prometheus.NewRegistry()),
 		testLogger(),
+		0,
 	)
 
 	pipelineService.Start(context.Background(), 1)

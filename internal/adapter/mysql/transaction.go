@@ -110,6 +110,20 @@ func (r *TransactionRepository) ListByUserAndMerchants(
 		arguments...)
 }
 
+func (r *TransactionRepository) DeleteOlderThan(ctx context.Context, olderThan time.Duration) (int64, error) {
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM transactions WHERE authorized_at < ? LIMIT 1000`,
+		time.Now().UTC().Add(-olderThan))
+	if err != nil {
+		return 0, fmt.Errorf("delete old transactions: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count deleted transactions: %w", err)
+	}
+	return deleted, nil
+}
+
 const transactionSelect = `SELECT id, user_id, merchant_id, merchant_name, mcc, amount_minor, currency, authorized_at
 	FROM transactions`
 

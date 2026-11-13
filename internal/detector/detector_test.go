@@ -2,6 +2,7 @@ package detector
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -168,6 +169,147 @@ func TestClassifyAgreesWithSweep(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDetectRejectsIrregularIntervals(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	repository := memory.NewTransactionRepository()
+	userID := domain.UserID("user-1")
+	merchantID := domain.MerchantID("spiky")
+	offsets := []int{62, 61, 60, 0}
+	for i, days := range offsets {
+		transaction := domain.Transaction{
+			ID:           domain.TransactionID(fmt.Sprintf("tx-%d", i)),
+			UserID:       userID,
+			MerchantID:   merchantID,
+			MerchantName: "Spiky Merchant",
+			MCC:          domain.MCCRecurringBilling,
+			AmountMinor:  1500,
+			Currency:     "USD",
+			AuthorizedAt: now.AddDate(0, 0, -days),
+		}
+		if err := repository.Save(context.Background(), transaction); err != nil {
+			t.Fatalf("save transaction: %v", err)
+		}
+	}
+
+	detections, err := New(repository, frozenClock{now: now}, DefaultConfig()).Detect(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(detections) != 0 {
+		t.Fatalf("intervals [1d, 1d, 60d] must not form a subscription, got %+v", detections)
+	}
+}
+
+func TestDetectRejectsTooFrequentNonSubscriptionMerchants(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	repository := memory.NewTransactionRepository()
+	userID := domain.UserID("user-1")
+	merchantID := domain.MerchantID("coffee")
+	for i := range 5 {
+		transaction := domain.Transaction{
+			ID:           domain.TransactionID(fmt.Sprintf("tx-%d", i)),
+			UserID:       userID,
+			MerchantID:   merchantID,
+			MerchantName: "Coffee",
+			MCC:          5814,
+			AmountMinor:  400,
+			Currency:     "USD",
+			AuthorizedAt: now.AddDate(0, 0, -i),
+		}
+		if err := repository.Save(context.Background(), transaction); err != nil {
+			t.Fatalf("save transaction: %v", err)
+		}
+	}
+
+	detections, err := New(repository, frozenClock{now: now}, DefaultConfig()).Detect(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(detections) != 0 {
+		t.Fatalf("daily purchases must not form a subscription, got %+v", detections)
+	}
+}
+
+func TestDetectFindsWeeklySubscription(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	repository := memory.NewTransactionRepository()
+	userID := domain.UserID("user-1")
+	merchantID := domain.MerchantID("gym")
+	for i := range 3 {
+		transaction := domain.Transaction{
+			ID:           domain.TransactionID(fmt.Sprintf("tx-%d", i)),
+			UserID:       userID,
+			MerchantID:   merchantID,
+			MerchantName: "Gym",
+			MCC:          domain.MCCRecurringBilling,
+			AmountMinor:  2500,
+			Currency:     "USD",
+			AuthorizedAt: now.AddDate(0, 0, -7*(2-i)),
+		}
+		if err := repository.Save(context.Background(), transaction); err != nil {
+			t.Fatalf("save transaction: %v", err)
+		}
+	}
+
+	detections, err := New(repository, frozenClock{now: now}, DefaultConfig()).Detect(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(detections) != 1 {
+		t.Fatalf("expected 1 detection, got %d", len(detections))
+	}
+	if detections[0].Window != domain.WindowWeekly {
+		t.Errorf("expected weekly window, got %s", detections[0].Window)
+	}
+}
+
+func TestMedianIntervalAveragesEvenCount(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	transactions := []domain.Transaction{
+		{AuthorizedAt: now.AddDate(0, 0, -40)},
+		{AuthorizedAt: now.AddDate(0, 0, -30)},
+		{AuthorizedAt: now.AddDate(0, 0, 0)},
+	}
+
+	median, ok := medianInterval(transactions)
+	if !ok {
+		t.Fatal("expected a median")
+	}
+	if median != 20*24*time.Hour {
+		t.Errorf("median of intervals [10d, 30d] = %s, want 20d", median)
+	}
+}
+
+func TestDetectRejectsQuarterlyIntervals(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	repository := memory.NewTransactionRepository()
+	userID := domain.UserID("user-1")
+	merchantID := domain.MerchantID("insurance")
+	for i := range 3 {
+		transaction := domain.Transaction{
+			ID:           domain.TransactionID(fmt.Sprintf("tx-%d", i)),
+			UserID:       userID,
+			MerchantID:   merchantID,
+			MerchantName: "Insurance",
+			MCC:          domain.MCCRecurringBilling,
+			AmountMinor:  9900,
+			Currency:     "USD",
+			AuthorizedAt: now.AddDate(0, 0, -90*(2-i)),
+		}
+		if err := repository.Save(context.Background(), transaction); err != nil {
+			t.Fatalf("save transaction: %v", err)
+		}
+	}
+
+	detections, err := New(repository, frozenClock{now: now}, DefaultConfig()).Detect(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(detections) != 0 {
+		t.Fatalf("a 90-day median fits no billing window and must not be detected, got %+v", detections)
 	}
 }
 

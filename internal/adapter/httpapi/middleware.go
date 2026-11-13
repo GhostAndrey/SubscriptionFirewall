@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,9 @@ import (
 const (
 	maxRequestIDLength = 64
 	maxRateLimiters    = 65536
+	limiterIdleTTL     = 10 * time.Minute
+
+	routeContextKey contextKey = "route_capture"
 )
 
 type rateLimiterEntry struct {
@@ -34,9 +38,10 @@ type ipRateLimiter struct {
 	limiters map[string]*rateLimiterEntry
 	limit    rate.Limit
 	burst    int
+	resolver clientIPResolver
 }
 
-func newIPRateLimiter(limitPerSecond float64, burst int) *ipRateLimiter {
+func newIPRateLimiter(limitPerSecond float64, burst int, resolver clientIPResolver) *ipRateLimiter {
 	if limitPerSecond <= 0 || burst <= 0 {
 		return nil
 	}
@@ -44,6 +49,7 @@ func newIPRateLimiter(limitPerSecond float64, burst int) *ipRateLimiter {
 		limiters: make(map[string]*rateLimiterEntry),
 		limit:    rate.Limit(limitPerSecond),
 		burst:    burst,
+		resolver: resolver,
 	}
 }
 
@@ -56,7 +62,7 @@ func (l *ipRateLimiter) middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !l.allow(clientIP(r)) {
+		if !l.allow(l.resolver.ip(r)) {
 			writeJSON(w, http.StatusTooManyRequests, ErrorResponse{Error: "rate limit exceeded"})
 			return
 		}
@@ -68,15 +74,7 @@ func (l *ipRateLimiter) allow(client string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if len(l.limiters) > maxRateLimiters {
-		cutoff := time.Now().Add(-10 * time.Minute)
-		for key, entry := range l.limiters {
-			if entry.lastSeen.Before(cutoff) {
-				delete(l.limiters, key)
-			}
-		}
-	}
-
+	l.evict()
 	entry, ok := l.limiters[client]
 	if !ok {
 		entry = &rateLimiterEntry{limiter: rate.NewLimiter(l.limit, l.burst)}
@@ -86,10 +84,110 @@ func (l *ipRateLimiter) allow(client string) bool {
 	return entry.limiter.Allow()
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+func (l *ipRateLimiter) evict() {
+	if len(l.limiters) < maxRateLimiters {
+		return
+	}
+	cutoff := time.Now().Add(-limiterIdleTTL)
+	owners := make([]limiterOwner, 0, len(l.limiters))
+	for key, entry := range l.limiters {
+		if entry.lastSeen.Before(cutoff) {
+			delete(l.limiters, key)
+			continue
+		}
+		owners = append(owners, limiterOwner{key: key, lastSeen: entry.lastSeen})
+	}
+	if len(l.limiters) < maxRateLimiters {
+		return
+	}
+	slices.SortFunc(owners, func(a, b limiterOwner) int {
+		return a.lastSeen.Compare(b.lastSeen)
+	})
+	surplus := len(l.limiters) - maxRateLimiters + 1
+	for _, owner := range owners[:surplus] {
+		delete(l.limiters, owner.key)
+	}
+}
+
+type limiterOwner struct {
+	key      string
+	lastSeen time.Time
+}
+
+type clientIPResolver struct {
+	trusted []*net.IPNet
+}
+
+func newClientIPResolver(proxies []string) (clientIPResolver, error) {
+	resolver := clientIPResolver{}
+	for _, entry := range proxies {
+		network, err := parseProxyCIDR(entry)
+		if err != nil {
+			return clientIPResolver{}, err
+		}
+		resolver.trusted = append(resolver.trusted, network)
+	}
+	return resolver, nil
+}
+
+func parseProxyCIDR(entry string) (*net.IPNet, error) {
+	if _, network, err := net.ParseCIDR(strings.TrimSpace(entry)); err == nil {
+		return network, nil
+	}
+	ip := net.ParseIP(strings.TrimSpace(entry))
+	if ip == nil {
+		return nil, fmt.Errorf("trusted proxy %q is not a CIDR or an IP address", entry)
+	}
+	bits := 32
+	if ip.To4() == nil {
+		bits = 128
+	}
+	return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, nil
+}
+
+func (c clientIPResolver) ip(r *http.Request) string {
+	remote := hostIP(r.RemoteAddr)
+	if !c.isTrusted(remote) {
+		return remote
+	}
+	if client := c.forwardedClient(r.Header.Get("X-Forwarded-For")); client != "" {
+		return client
+	}
+	return remote
+}
+
+func (c clientIPResolver) isTrusted(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, network := range c.trusted {
+		if network.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c clientIPResolver) forwardedClient(header string) string {
+	entries := strings.Split(header, ",")
+	for i := len(entries) - 1; i >= 0; i-- {
+		candidate := net.ParseIP(strings.TrimSpace(entries[i]))
+		if candidate == nil {
+			return ""
+		}
+		if c.isTrusted(candidate.String()) {
+			continue
+		}
+		return candidate.String()
+	}
+	return ""
+}
+
+func hostIP(address string) string {
+	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		return r.RemoteAddr
+		return address
 	}
 	return host
 }
@@ -149,24 +247,40 @@ func observationMiddleware(logger *slog.Logger, metrics *obs.Metrics, next http.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w}
+		route := &routeCapture{}
+		r = r.WithContext(context.WithValue(r.Context(), routeContextKey, route))
+		requestID := requestIDFromContext(r.Context())
 
-		defer func() { //nolint:contextcheck // contextcheck cannot see the captured closure
-			route := r.Pattern
-			if route == "" {
-				route = "unmatched"
+		defer func() {
+			routeLabel := route.pattern
+			if routeLabel == "" {
+				routeLabel = "unmatched"
 			}
 			duration := time.Since(started)
-			metrics.ObserveHTTPRequest(r.Method, route, recorder.Status(), duration)
+			metrics.ObserveHTTPRequest(r.Method, routeLabel, recorder.Status(), duration)
 			logger.Info("http request",
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", recorder.Status(),
 				"duration_ms", duration.Milliseconds(),
-				"request_id", requestIDFromContext(r.Context()),
+				"request_id", requestID,
 			)
 		}()
 
 		next.ServeHTTP(recorder, r)
+	})
+}
+
+type routeCapture struct {
+	pattern string
+}
+
+func routeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		if capture, ok := r.Context().Value(routeContextKey).(*routeCapture); ok {
+			capture.pattern = r.Pattern
+		}
 	})
 }
 

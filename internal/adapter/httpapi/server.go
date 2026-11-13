@@ -59,8 +59,9 @@ type Config struct {
 	Tracing bool
 	// RedisAddr, when set, moves the per-IP rate limit into Redis so it is
 	// shared by all replicas; empty keeps the in-process limiter.
-	RedisAddr     string
-	RedisPassword string
+	RedisAddr      string
+	RedisPassword  string
+	TrustedProxies []string
 }
 
 func NewServer(
@@ -119,8 +120,12 @@ func NewServer(
 	mux.HandleFunc("POST /v1/tokens/{id}/terminate", server.handleTerminateToken)
 	mux.HandleFunc("POST /v1/tokens/{id}/authorize", server.handleAuthorizeCharge)
 
+	resolver, err := newClientIPResolver(config.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("httpapi: %w", err)
+	}
 	limiterMiddleware := func(next http.Handler) http.Handler { return next }
-	if limiter := newIPRateLimiter(config.RateLimit, config.RateBurst); limiter != nil {
+	if limiter := newIPRateLimiter(config.RateLimit, config.RateBurst, resolver); limiter != nil {
 		limiterMiddleware = limiter.middleware
 	}
 	if config.RedisAddr != "" {
@@ -128,7 +133,7 @@ func NewServer(
 			Addr:     config.RedisAddr,
 			Password: config.RedisPassword,
 		})
-		if redisLimiter := newRedisRateLimiter(redisClient, int(config.RateLimit), config.RateBurst, logger); redisLimiter != nil {
+		if redisLimiter := newRedisRateLimiter(redisClient, int(config.RateLimit), logger, resolver); redisLimiter != nil {
 			limiterMiddleware = redisLimiter.middleware
 			server.redis = redisClient
 		} else {
@@ -136,9 +141,9 @@ func NewServer(
 		}
 	}
 
-	var instrumented http.Handler = mux
+	var instrumented = routeMiddleware(mux)
 	if config.Tracing {
-		instrumented = otelhttp.NewHandler(mux, "http",
+		instrumented = otelhttp.NewHandler(instrumented, "http",
 			otelhttp.WithFilter(func(request *http.Request) bool {
 				return !isPublicPath(request.URL.Path)
 			}),

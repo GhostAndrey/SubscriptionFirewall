@@ -3,8 +3,10 @@ package httpapi
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -182,6 +184,116 @@ func TestObservationMiddlewareRecoversAndStillRecords(t *testing.T) {
 	t.Fatal("a recovered panic must still be recorded as 500")
 }
 
+func TestObservationMiddlewareAttributesTheMatchedRoute(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := obs.NewMetrics(registry)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/subscriptions/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := observationMiddleware(testLogger(), metrics, routeMiddleware(mux))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/subscriptions/sub-1", nil))
+
+	assertRouteRecorded(t, registry, "GET /v1/subscriptions/{id}")
+}
+
+func TestObservationMiddlewareAttributesRoutesBehindAuth(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := obs.NewMetrics(registry)
+	auth := mustAPIKeyAuthenticator([]string{"key:read"})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/subscriptions/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := observationMiddleware(testLogger(), metrics,
+		auth.middleware(testLogger(), routeMiddleware(mux)))
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/subscriptions/sub-1", nil)
+	request.Header.Set("X-API-Key", "key")
+	handler.ServeHTTP(recorder, request)
+
+	assertRouteRecorded(t, registry, "GET /v1/subscriptions/{id}")
+}
+
+func assertRouteRecorded(t *testing.T, registry *prometheus.Registry, pattern string) {
+	t.Helper()
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	found := false
+	for _, family := range families {
+		if family.GetName() != "subscription_firewall_http_requests_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() != "route" {
+					continue
+				}
+				if pair.GetValue() == "unmatched" {
+					t.Fatal("a matched route must not be recorded as unmatched")
+				}
+				if pair.GetValue() == pattern {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected route %s to be recorded", pattern)
+	}
+}
+
+func TestIPRateLimiterEvictsOldestBucketsAtCapacity(t *testing.T) {
+	limiter := newIPRateLimiter(1000, 1000, clientIPResolver{})
+	if limiter == nil {
+		t.Fatal("expected a limiter")
+	}
+
+	keys := make([]string, 0, maxRateLimiters+5)
+	for i := range maxRateLimiters + 5 {
+		key := strconv.Itoa(i)
+		if !limiter.allow(key) {
+			t.Fatalf("client %d must pass while the map fills", i)
+		}
+		keys = append(keys, key)
+	}
+
+	base := time.Now().Add(-time.Hour)
+	limiter.mu.Lock()
+	for i, key := range keys {
+		if entry, ok := limiter.limiters[key]; ok {
+			entry.lastSeen = base.Add(time.Duration(i) * time.Millisecond)
+		}
+	}
+	limiter.mu.Unlock()
+
+	for j := range 5 {
+		if !limiter.allow(strconv.Itoa(maxRateLimiters + j)) {
+			t.Fatalf("fresh client %d must pass once the map is capped", j)
+		}
+	}
+
+	limiter.mu.Lock()
+	size := len(limiter.limiters)
+	_, oldestAlive := limiter.limiters["0"]
+	limiter.mu.Unlock()
+
+	if size > maxRateLimiters {
+		t.Fatalf("limiter size = %d, must stay capped at %d", size, maxRateLimiters)
+	}
+	if oldestAlive {
+		t.Fatal("the oldest bucket must be evicted once the map overflows")
+	}
+}
+
 func TestAPIKeyMatchesIgnoresLengthDifferences(t *testing.T) {
 	auth := mustAPIKeyAuthenticator([]string{"short", "a-much-longer-key-value"})
 
@@ -213,5 +325,50 @@ func TestAPIKeyMatchesPrefersTheLastMatchingKey(t *testing.T) {
 	}
 	if !key.allows(scopeManage) {
 		t.Error("expected the last matching key to win, preserving prior behaviour")
+	}
+}
+
+func TestClientIPResolverIgnoresForwardedHeaderFromUntrustedPeer(t *testing.T) {
+	resolver, err := newClientIPResolver(nil)
+	if err != nil {
+		t.Fatalf("build resolver: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "198.51.100.10:5678"
+	request.Header.Set("X-Forwarded-For", "203.0.113.7")
+
+	if got := resolver.ip(request); got != "198.51.100.10" {
+		t.Errorf("ip = %q, want the peer address 198.51.100.10", got)
+	}
+}
+
+func TestClientIPResolverTakesRightmostUntrustedForwardedEntry(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8", "192.168.1.5"})
+	if err != nil {
+		t.Fatalf("build resolver: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "10.1.2.3:443"
+	request.Header.Set("X-Forwarded-For", "203.0.113.7, 10.5.5.5, 192.168.1.5")
+
+	if got := resolver.ip(request); got != "203.0.113.7" {
+		t.Errorf("ip = %q, want 203.0.113.7", got)
+	}
+}
+
+func TestClientIPResolverFallsBackToPeerOnMalformedForwardedEntries(t *testing.T) {
+	resolver, err := newClientIPResolver([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatalf("build resolver: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "10.1.2.3:443"
+	request.Header.Set("X-Forwarded-For", "not-an-ip")
+
+	if got := resolver.ip(request); got != "10.1.2.3" {
+		t.Errorf("ip = %q, want the peer address 10.1.2.3", got)
 	}
 }

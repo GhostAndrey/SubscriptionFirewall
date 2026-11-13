@@ -96,7 +96,17 @@ func run() error {
 		logger.Error("http server shutdown failed", "error", err)
 	}
 
-	application.close()
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		application.close()
+	}()
+	select {
+	case <-drained:
+	case <-time.After(cfg.shutdownTimeout):
+		logger.Error("background drain timed out", "timeout", cfg.shutdownTimeout.String())
+	}
+
 	logger.Info("shutdown complete")
 	return nil
 }

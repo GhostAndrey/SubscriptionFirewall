@@ -117,8 +117,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.rateLimit != 100 || cfg.rateBurst != 200 {
 		t.Errorf("rate limit = %v, burst = %d", cfg.rateLimit, cfg.rateBurst)
 	}
-	if !cfg.otlpInsecure {
-		t.Error("otlp insecure must default to true")
+	if cfg.otlpInsecure {
+		t.Error("otlp insecure must default to false")
 	}
 	if cfg.logLevel != slog.LevelInfo {
 		t.Errorf("log level = %s, want info", cfg.logLevel)
@@ -132,7 +132,8 @@ func TestLoadConfigReadsEnvironment(t *testing.T) {
 	t.Setenv("SUBSCRIPTION_FIREWALL_SWEEP_INTERVAL", "90s")
 	t.Setenv("SUBSCRIPTION_FIREWALL_LOG_LEVEL", "debug")
 	t.Setenv("SUBSCRIPTION_FIREWALL_ISSUANCE_TIMEOUT", "2m")
-	t.Setenv("SUBSCRIPTION_FIREWALL_OTLP_INSECURE", "false")
+	t.Setenv("SUBSCRIPTION_FIREWALL_OTLP_INSECURE", "true")
+	t.Setenv("SUBSCRIPTION_FIREWALL_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.1.5")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -157,8 +158,11 @@ func TestLoadConfigReadsEnvironment(t *testing.T) {
 	if cfg.issuanceTimeout != 2*time.Minute {
 		t.Errorf("issuance timeout = %s", cfg.issuanceTimeout)
 	}
-	if cfg.otlpInsecure {
-		t.Error("otlp insecure = true, want false")
+	if !cfg.otlpInsecure {
+		t.Error("otlp insecure = false, want true")
+	}
+	if len(cfg.trustedProxies) != 2 || cfg.trustedProxies[0] != "10.0.0.0/8" || cfg.trustedProxies[1] != "192.168.1.5" {
+		t.Errorf("trusted proxies = %v", cfg.trustedProxies)
 	}
 }
 

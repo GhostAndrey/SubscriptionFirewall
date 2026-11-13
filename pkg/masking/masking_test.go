@@ -29,10 +29,15 @@ func TestTokenRevealsOnlyEdges(t *testing.T) {
 		input string
 		want  string
 	}{
-		"long token":  {input: "vtok-abcdef123456", want: "vtok…3456"},
-		"short token": {input: "ab", want: "****"},
-		"tiny token":  {input: "a", want: "****"},
-		"empty token": {input: "", want: "****"},
+		"long token":        {input: "vtok-abcdef123456", want: "vtok…3456"},
+		"minimum length":    {input: "abcd1234efgh", want: "****"},
+		"one above minimum": {input: "abcd1234efghi", want: "abcd…fghi"},
+		"eight characters":  {input: "abcd1234", want: "****"},
+		"short token":       {input: "ab", want: "****"},
+		"tiny token":        {input: "a", want: "****"},
+		"empty token":       {input: "", want: "****"},
+		"short api key":     {input: "key1234", want: "****"},
+		"medium api key":    {input: "local-dev-key", want: "loca…-key"},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

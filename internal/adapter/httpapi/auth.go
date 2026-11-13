@@ -169,11 +169,11 @@ func apiKeyFromRequest(r *http.Request) string {
 	if header := r.Header.Get("X-API-Key"); header != "" {
 		return header
 	}
-	const prefix = "Bearer "
-	if authorization := r.Header.Get("Authorization"); strings.HasPrefix(authorization, prefix) {
-		return strings.TrimPrefix(authorization, prefix)
+	fields := strings.Fields(r.Header.Get("Authorization"))
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") {
+		return ""
 	}
-	return ""
+	return fields[1]
 }
 
 func actorFromContext(ctx context.Context) string {

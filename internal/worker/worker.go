@@ -1,12 +1,10 @@
-// Package worker runs the claim-process-acknowledge loop shared by the
-// detection pipeline and the lifecycle syncer. One implementation keeps the
-// retry, backoff and shutdown rules from drifting apart between consumers.
 package worker
 
 import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -19,6 +17,7 @@ const (
 type Runner[T any] struct {
 	claim    func(ctx context.Context, limit int) ([]T, error)
 	process  func(ctx context.Context, item T)
+	onPanic  func(ctx context.Context, item T, recovered any)
 	maintain func(ctx context.Context)
 	name     string
 	logger   *slog.Logger
@@ -32,12 +31,10 @@ type Runner[T any] struct {
 }
 
 type Options[T any] struct {
-	Claim   func(ctx context.Context, limit int) ([]T, error)
-	Process func(ctx context.Context, item T)
-	// Maintenance requeues stale entries and refreshes gauges; nil disables
-	// the maintenance loop.
-	Maintenance func(ctx context.Context)
-	// Zero defaults to one minute.
+	Claim               func(ctx context.Context, limit int) ([]T, error)
+	Process             func(ctx context.Context, item T)
+	OnPanic             func(ctx context.Context, item T, recovered any)
+	Maintenance         func(ctx context.Context)
 	MaintenanceInterval time.Duration
 	Name                string
 	Logger              *slog.Logger
@@ -53,6 +50,7 @@ func New[T any](options Options[T]) *Runner[T] {
 	return &Runner[T]{
 		claim:    options.Claim,
 		process:  options.Process,
+		onPanic:  options.OnPanic,
 		maintain: options.Maintenance,
 		name:     options.Name,
 		logger:   options.Logger,
@@ -60,10 +58,8 @@ func New[T any](options Options[T]) *Runner[T] {
 	}
 }
 
-// Start launches workerCount processing goroutines plus the maintenance loop;
-// starting twice is a no-op.
 func (r *Runner[T]) Start(ctx context.Context, workerCount int) {
-	workerContext, cancel := context.WithCancel(ctx)
+	claimContext, cancel := context.WithCancel(ctx)
 
 	r.mu.Lock()
 	if r.started {
@@ -75,13 +71,14 @@ func (r *Runner[T]) Start(ctx context.Context, workerCount int) {
 	r.cancel = cancel
 	r.mu.Unlock()
 
+	processContext := context.WithoutCancel(ctx)
 	for range workerCount {
 		r.workers.Add(1)
-		go r.processLoop(workerContext)
+		go r.processLoop(claimContext, processContext)
 	}
 	if r.maintain != nil {
 		r.workers.Add(1)
-		go r.maintenanceLoop(workerContext)
+		go r.maintenanceLoop(claimContext)
 	}
 
 	r.logger.Info(r.name+" started", "workers", workerCount)
@@ -102,27 +99,42 @@ func (r *Runner[T]) Stop() {
 	r.logger.Info(r.name + " stopped")
 }
 
-func (r *Runner[T]) processLoop(ctx context.Context) {
+func (r *Runner[T]) processLoop(claimContext, processContext context.Context) {
 	defer r.workers.Done()
 	for {
-		batch, err := r.claim(ctx, claimBatchSize)
+		batch, err := r.claim(claimContext, claimBatchSize)
 		for _, item := range batch {
-			r.process(ctx, item)
+			r.processSafely(processContext, item)
 		}
 		switch {
 		case errors.Is(err, context.Canceled):
 			return
 		case err != nil:
 			r.logger.Error("claim "+r.name+" failed", "error", err)
-			if !Sleep(ctx, claimRetryDelay) {
+			if !Sleep(claimContext, claimRetryDelay) {
 				return
 			}
 			continue
 		}
-		if len(batch) == 0 && !Sleep(ctx, claimRetryDelay) {
+		if len(batch) == 0 && !Sleep(claimContext, claimRetryDelay) {
 			return
 		}
 	}
+}
+
+func (r *Runner[T]) processSafely(ctx context.Context, item T) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+		r.logger.Error("panic in "+r.name+" worker",
+			"panic", recovered, "stack", string(debug.Stack()))
+		if r.onPanic != nil {
+			r.onPanic(ctx, item, recovered)
+		}
+	}()
+	r.process(ctx, item)
 }
 
 func (r *Runner[T]) maintenanceLoop(ctx context.Context) {
@@ -136,12 +148,20 @@ func (r *Runner[T]) maintenanceLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		r.maintain(ctx)
+		r.maintainSafely(ctx)
 	}
 }
 
-// Sleep waits for the delay and reports whether it elapsed; a cancelled
-// context returns false, which callers use to leave their loop.
+func (r *Runner[T]) maintainSafely(ctx context.Context) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			r.logger.Error("panic in "+r.name+" maintenance",
+				"panic", recovered, "stack", string(debug.Stack()))
+		}
+	}()
+	r.maintain(ctx)
+}
+
 func Sleep(ctx context.Context, delay time.Duration) bool {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()

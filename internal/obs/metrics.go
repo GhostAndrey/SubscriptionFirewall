@@ -23,6 +23,8 @@ type Metrics struct {
 	lifecycleSync         *prometheus.CounterVec
 	linkedActionFailures  *prometheus.CounterVec
 	lifecycleQueueDepth   prometheus.Gauge
+	workerPanics          *prometheus.CounterVec
+	auditWriteFailures    prometheus.Counter
 }
 
 func NewMetrics(registerer prometheus.Registerer) *Metrics {
@@ -93,6 +95,16 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			Name:      "lifecycle_queue_depth",
 			Help:      "Pending lifecycle synchronizations awaiting the counterpart entity.",
 		}),
+		workerPanics: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "subscription_firewall",
+			Name:      "worker_panics_total",
+			Help:      "Panics recovered in background workers, by component.",
+		}, []string{"name"}),
+		auditWriteFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "subscription_firewall",
+			Name:      "audit_write_failures_total",
+			Help:      "Audit log writes that failed after the transition was applied.",
+		}),
 	}
 	if registerer != nil {
 		registerer.MustRegister(
@@ -121,6 +133,8 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 			metrics.lifecycleSync,
 			metrics.linkedActionFailures,
 			metrics.lifecycleQueueDepth,
+			metrics.workerPanics,
+			metrics.auditWriteFailures,
 		)
 	}
 	return metrics
@@ -150,6 +164,12 @@ func (m *Metrics) CountLinkedActionFailure(entity, action string) {
 }
 func (m *Metrics) SetLifecycleQueueDepth(depth int) {
 	m.lifecycleQueueDepth.Set(float64(depth))
+}
+func (m *Metrics) CountWorkerPanic(name string) {
+	m.workerPanics.WithLabelValues(name).Inc()
+}
+func (m *Metrics) CountAuditWriteFailure() {
+	m.auditWriteFailures.Inc()
 }
 func (m *Metrics) ObserveHTTPRequest(method, route string, status int, duration time.Duration) {
 	statusCode := strconv.Itoa(status)

@@ -23,26 +23,23 @@ const (
 // for reads, but money-moving endpoints are refused instead: availability is
 // not worth letting an outage turn into an unmetered spending window.
 type redisRateLimiter struct {
-	client *redis.Client
-	limit  int
-	burst  int
-	window time.Duration
-	logger *slog.Logger
+	client   *redis.Client
+	limit    int
+	window   time.Duration
+	logger   *slog.Logger
+	resolver clientIPResolver
 }
 
-func newRedisRateLimiter(client *redis.Client, limit, burst int, logger *slog.Logger) *redisRateLimiter {
+func newRedisRateLimiter(client *redis.Client, limit int, logger *slog.Logger, resolver clientIPResolver) *redisRateLimiter {
 	if client == nil || limit <= 0 {
 		return nil
 	}
-	if burst < limit {
-		burst = limit
-	}
 	return &redisRateLimiter{
-		client: client,
-		limit:  limit,
-		burst:  burst,
-		window: redisWindow,
-		logger: logger,
+		client:   client,
+		limit:    limit,
+		window:   redisWindow,
+		logger:   logger,
+		resolver: resolver,
 	}
 }
 
@@ -53,7 +50,7 @@ func (l *redisRateLimiter) middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		allowed, retryAfter, err := l.allow(r.Context(), clientIP(r))
+		allowed, retryAfter, err := l.allow(r.Context(), l.resolver.ip(r))
 		if err != nil {
 			l.logger.Error("redis rate limit check failed", "path", r.URL.Path, "error", err)
 			if requiresHardLimit(r) {
@@ -93,7 +90,7 @@ func (l *redisRateLimiter) allow(ctx context.Context, client string) (allowed bo
 		return false, 0, fmt.Errorf("rate limit counter: %w", err)
 	}
 
-	if incr.Val() > int64(l.burst) {
+	if incr.Val() > int64(l.limit) {
 		retry := windowSeconds - int(l.now()%int64(windowSeconds))
 		return false, retry, nil
 	}

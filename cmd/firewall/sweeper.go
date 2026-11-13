@@ -29,6 +29,7 @@ type subscriptionSweeper struct {
 	database      *sql.DB
 	subscriptions *subscription.Service
 	lifecycle     *lifecycle.Service
+	pruner        *historyPruner
 	metrics       *obs.Metrics
 	logger        *slog.Logger
 	interval      time.Duration
@@ -43,6 +44,7 @@ func newSubscriptionSweeper(
 	database *sql.DB,
 	subscriptions *subscription.Service,
 	lifecycleService *lifecycle.Service,
+	pruner *historyPruner,
 	metrics *obs.Metrics,
 	logger *slog.Logger,
 	interval time.Duration,
@@ -51,6 +53,7 @@ func newSubscriptionSweeper(
 		database:      database,
 		subscriptions: subscriptions,
 		lifecycle:     lifecycleService,
+		pruner:        pruner,
 		metrics:       metrics,
 		logger:        logger,
 		interval:      interval,
@@ -110,11 +113,12 @@ func (s *subscriptionSweeper) sweepOnce(ctx context.Context) {
 	defer release()
 
 	changed, err := s.subscriptions.Sweep(ctx, 0)
-	if errors.Is(err, context.Canceled) {
-		s.logger.Info("subscription sweep interrupted, completing the transitions already persisted")
-	} else if err != nil {
-		s.logger.Error("subscription sweep failed", "error", err)
-		return
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			s.logger.Info("subscription sweep interrupted, completing the transitions already persisted")
+		} else {
+			s.logger.Error("subscription sweep failed", "error", err)
+		}
 	}
 	for _, subscription := range changed {
 		s.metrics.CountSubscriptionSwept(string(subscription.State))
@@ -134,6 +138,7 @@ func (s *subscriptionSweeper) sweepOnce(ctx context.Context) {
 			)
 		}
 	}
+	s.pruner.prune(ctx)
 }
 
 // detach keeps the shutdown deadline off work that must still reach the

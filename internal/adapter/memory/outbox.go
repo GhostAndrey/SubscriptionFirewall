@@ -153,6 +153,10 @@ func (o *DetectionOutbox) RequeueStale(_ context.Context, _ time.Duration) (int6
 	return 0, nil
 }
 
+func (o *DetectionOutbox) DeleteFinished(_ context.Context, _ time.Duration) (int64, error) {
+	return 0, nil
+}
+
 func (o *DetectionOutbox) PendingCount(_ context.Context) (int64, error) {
 	return int64(len(o.jobs)), nil
 }
@@ -171,7 +175,12 @@ var _ ports.DetectionOutbox = (*DetectionOutbox)(nil)
 
 type AuditLog struct {
 	mu      sync.Mutex
-	entries []ports.AuditEntry
+	entries []auditEntry
+}
+
+type auditEntry struct {
+	entry     ports.AuditEntry
+	createdAt time.Time
 }
 
 func NewAuditLog() *AuditLog {
@@ -181,14 +190,36 @@ func NewAuditLog() *AuditLog {
 func (a *AuditLog) Record(_ context.Context, entry ports.AuditEntry) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.entries = append(a.entries, entry)
+	a.entries = append(a.entries, auditEntry{entry: entry, createdAt: time.Now()})
 	return nil
+}
+
+func (a *AuditLog) DeleteOlderThan(_ context.Context, olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	kept := a.entries[:0:0]
+	var deleted int64
+	for _, entry := range a.entries {
+		if entry.createdAt.Before(cutoff) {
+			deleted++
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	a.entries = kept
+	return deleted, nil
 }
 
 func (a *AuditLog) Entries() []ports.AuditEntry {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]ports.AuditEntry(nil), a.entries...)
+	entries := make([]ports.AuditEntry, 0, len(a.entries))
+	for _, entry := range a.entries {
+		entries = append(entries, entry.entry)
+	}
+	return entries
 }
 
 var _ ports.AuditLog = (*AuditLog)(nil)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -11,10 +12,13 @@ import (
 )
 
 const (
-	defaultIngestQueueCapacity = 1024
-	defaultWorkerCount         = 4
-	defaultSweepInterval       = time.Minute
-	defaultMonthlyLimitMinor   = 100_000
+	defaultIngestQueueCapacity  = 1024
+	defaultWorkerCount          = 4
+	defaultSweepInterval        = time.Minute
+	defaultMonthlyLimitMinor    = 100_000
+	defaultOutboxRetention      = 7 * 24 * time.Hour
+	defaultTransactionRetention = 730 * 24 * time.Hour
+	defaultAuditRetention       = 365 * 24 * time.Hour
 )
 
 type config struct {
@@ -37,6 +41,7 @@ type config struct {
 	logLevel                slog.Level
 	rateLimit               float64
 	rateBurst               int
+	trustedProxies          []string
 	redisAddr               string
 	redisPassword           string
 	otlpEndpoint            string
@@ -47,6 +52,9 @@ type config struct {
 	issuerBreakerCooldown   time.Duration
 	issuanceTimeout         time.Duration
 	issuer                  string
+	outboxRetention         time.Duration
+	transactionRetention    time.Duration
+	auditRetention          time.Duration
 }
 
 // loadConfig reads every knob from the environment; parsers return an error
@@ -70,13 +78,16 @@ func loadConfig() (config, error) {
 		logLevel:                slog.LevelInfo,
 		rateLimit:               100,
 		rateBurst:               200,
-		otlpInsecure:            true,
+		otlpInsecure:            false,
 		issuerTimeout:           5 * time.Second,
 		issuerRetries:           2,
 		issuerBreakerThreshold:  5,
 		issuerBreakerCooldown:   30 * time.Second,
 		issuanceTimeout:         5 * time.Minute,
 		issuer:                  issuerSimulated,
+		outboxRetention:         defaultOutboxRetention,
+		transactionRetention:    defaultTransactionRetention,
+		auditRetention:          defaultAuditRetention,
 	}
 
 	for _, read := range []func() error{
@@ -89,6 +100,7 @@ func loadConfig() (config, error) {
 		},
 		func() error { return readNonNegativeFloat(&cfg.rateLimit, "SUBSCRIPTION_FIREWALL_RATE_LIMIT") },
 		func() error { return readPositiveInt(&cfg.rateBurst, "SUBSCRIPTION_FIREWALL_RATE_BURST") },
+		func() error { return readTrustedProxies(&cfg.trustedProxies, "SUBSCRIPTION_FIREWALL_TRUSTED_PROXIES") },
 		func() error { return readPositiveDuration(&cfg.readTimeout, "SUBSCRIPTION_FIREWALL_READ_TIMEOUT") },
 		func() error { return readPositiveDuration(&cfg.writeTimeout, "SUBSCRIPTION_FIREWALL_WRITE_TIMEOUT") },
 		func() error { return readNonNegativeDuration(&cfg.idleTimeout, "SUBSCRIPTION_FIREWALL_IDLE_TIMEOUT") },
@@ -120,6 +132,15 @@ func loadConfig() (config, error) {
 		},
 		func() error {
 			return readPositiveDuration(&cfg.issuanceTimeout, "SUBSCRIPTION_FIREWALL_ISSUANCE_TIMEOUT")
+		},
+		func() error {
+			return readPositiveDuration(&cfg.outboxRetention, "SUBSCRIPTION_FIREWALL_OUTBOX_RETENTION")
+		},
+		func() error {
+			return readNonNegativeDuration(&cfg.transactionRetention, "SUBSCRIPTION_FIREWALL_TRANSACTION_RETENTION")
+		},
+		func() error {
+			return readNonNegativeDuration(&cfg.auditRetention, "SUBSCRIPTION_FIREWALL_AUDIT_RETENTION")
 		},
 	} {
 		if err := read(); err != nil {
@@ -180,6 +201,31 @@ func envList(name string) []string {
 		return nil
 	}
 	return strings.Split(configured, ",")
+}
+
+func readTrustedProxies(target *[]string, name string) error {
+	configured := os.Getenv(name)
+	if configured == "" {
+		return nil
+	}
+	entries := make([]string, 0)
+	for _, entry := range strings.Split(configured, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(entry); err == nil {
+			entries = append(entries, entry)
+			continue
+		}
+		if net.ParseIP(entry) != nil {
+			entries = append(entries, entry)
+			continue
+		}
+		return fmt.Errorf("%s must be a comma-separated list of CIDRs or IP addresses, got %q", name, entry)
+	}
+	*target = entries
+	return nil
 }
 
 func readBool(target *bool, name string) error {

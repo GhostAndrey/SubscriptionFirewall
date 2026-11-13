@@ -47,6 +47,21 @@ func (r *TransactionRepository) ListByUserSince(_ context.Context, userID domain
 	return r.transactionsSinceLocked(userID, since, nil), nil
 }
 
+func (r *TransactionRepository) DeleteOlderThan(_ context.Context, olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var deleted int64
+	for id, transaction := range r.transactions {
+		if transaction.AuthorizedAt.Before(cutoff) {
+			delete(r.transactions, id)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 func (r *TransactionRepository) ListRecurringMerchantCandidates(
 	_ context.Context,
 	userID domain.UserID,

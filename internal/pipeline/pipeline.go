@@ -25,13 +25,14 @@ const staleItemAfter = 5 * time.Minute
 var tracer = otel.Tracer("subscriptionfirewall/pipeline")
 
 type Pipeline struct {
-	outbox        ports.DetectionOutbox
-	detector      *detector.Detector
-	subscriptions *subscription.Service
-	tokens        *token.Service
-	metrics       *obs.Metrics
-	logger        *slog.Logger
-	runner        *worker.Runner[ports.OutboxItem]
+	outbox            ports.DetectionOutbox
+	detector          *detector.Detector
+	subscriptions     *subscription.Service
+	tokens            *token.Service
+	metrics           *obs.Metrics
+	logger            *slog.Logger
+	finishedRetention time.Duration
+	runner            *worker.Runner[ports.OutboxItem]
 }
 
 func New(
@@ -41,18 +42,21 @@ func New(
 	tokens *token.Service,
 	metrics *obs.Metrics,
 	logger *slog.Logger,
+	finishedRetention time.Duration,
 ) *Pipeline {
 	p := &Pipeline{
-		outbox:        outbox,
-		detector:      detectorService,
-		subscriptions: subscriptions,
-		tokens:        tokens,
-		metrics:       metrics,
-		logger:        logger,
+		outbox:            outbox,
+		detector:          detectorService,
+		subscriptions:     subscriptions,
+		tokens:            tokens,
+		metrics:           metrics,
+		logger:            logger,
+		finishedRetention: finishedRetention,
 	}
 	p.runner = worker.New(worker.Options[ports.OutboxItem]{
 		Claim:               p.claimUntilOpen,
 		Process:             p.processItem,
+		OnPanic:             p.onItemPanic,
 		Maintenance:         p.maintain,
 		MaintenanceInterval: time.Minute,
 		Name:                "detection pipeline",
@@ -101,13 +105,20 @@ func (p *Pipeline) processItem(ctx context.Context, item ports.OutboxItem) {
 			"attempt", item.Attempts,
 			"error", err,
 		)
-		if err := p.outbox.Fail(ctx, item); err != nil {
+		if err := p.outbox.Fail(context.WithoutCancel(ctx), item); err != nil {
 			p.logger.Error("mark detection job failed", "job_id", item.ID, "error", err)
 		}
 		return
 	}
-	if err := p.outbox.Complete(ctx, []int64{item.ID}); err != nil {
+	if err := p.outbox.Complete(context.WithoutCancel(ctx), []int64{item.ID}); err != nil {
 		p.logger.Error("complete detection job", "job_id", item.ID, "error", err)
+	}
+}
+
+func (p *Pipeline) onItemPanic(ctx context.Context, item ports.OutboxItem, _ any) {
+	p.metrics.CountWorkerPanic("detection")
+	if err := p.outbox.Fail(context.WithoutCancel(ctx), item); err != nil {
+		p.logger.Error("fail detection job after panic", "job_id", item.ID, "error", err)
 	}
 }
 
@@ -161,7 +172,20 @@ func (p *Pipeline) maintain(ctx context.Context) {
 	} else if requeued > 0 {
 		p.logger.Warn("requeued stale detection jobs", "count", requeued)
 	}
+	p.deleteFinished(ctx)
 	if pending, err := p.outbox.PendingCount(ctx); err == nil {
 		p.metrics.SetQueueDepth(int(pending))
+	}
+}
+
+func (p *Pipeline) deleteFinished(ctx context.Context) {
+	if p.finishedRetention <= 0 {
+		return
+	}
+	deleted, err := p.outbox.DeleteFinished(ctx, p.finishedRetention)
+	if err != nil {
+		p.logger.Error("delete finished detection jobs failed", "error", err)
+	} else if deleted > 0 {
+		p.logger.Info("deleted finished detection jobs", "count", deleted)
 	}
 }

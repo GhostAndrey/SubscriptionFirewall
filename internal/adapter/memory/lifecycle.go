@@ -118,6 +118,21 @@ func (q *LifecycleSyncQueue) PendingCount(context.Context) (int64, error) {
 	return pending, nil
 }
 
+func (q *LifecycleSyncQueue) DeleteFinished(_ context.Context, olderThan time.Duration) (int64, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	cutoff := time.Now().Add(-olderThan)
+	var deleted int64
+	for id, entry := range q.tasks {
+		if (entry.status == "done" || entry.status == "failed") && entry.updatedAt.Before(cutoff) {
+			delete(q.tasks, id)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 // idsInOrder lists task ids oldest first so claims replay a backlog in the
 // sequence it was created.
 func (q *LifecycleSyncQueue) idsInOrder() []int64 {

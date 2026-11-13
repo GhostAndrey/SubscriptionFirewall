@@ -808,6 +808,130 @@ func TestOutboxClaimCompleteAndRetry(t *testing.T) {
 	}
 }
 
+func TestOutboxRequeueStaleFailsExhaustedAttempts(t *testing.T) {
+	db := testDB(t)
+	outbox := NewOutbox(db)
+	ctx := context.Background()
+
+	item := claimOneOutboxItem(t, outbox, ctx, "tx-poison")
+	if _, err := db.ExecContext(ctx,
+		`UPDATE detection_outbox SET attempts = ?, updated_at = ? WHERE id = ?`,
+		maxOutboxAttempts, time.Now().UTC().Add(-time.Minute), item.ID); err != nil {
+		t.Fatalf("exhaust attempts: %v", err)
+	}
+
+	requeued, err := outbox.RequeueStale(ctx, 0)
+	if err != nil || requeued != 1 {
+		t.Fatalf("expected 1 stale item reprocessed, got %d (%v)", requeued, err)
+	}
+	if status := outboxStatus(t, db, ctx, item.ID); status != "failed" {
+		t.Fatalf("status = %s, want failed", status)
+	}
+	if pending, err := outbox.PendingCount(ctx); err != nil || pending != 0 {
+		t.Fatalf("an exhausted item must not stay pending, got %d (%v)", pending, err)
+	}
+}
+
+func TestOutboxFailIgnoresAStaleClaim(t *testing.T) {
+	db := testDB(t)
+	outbox := NewOutbox(db)
+	ctx := context.Background()
+
+	item := claimOneOutboxItem(t, outbox, ctx, "tx-stale-fail")
+	if _, err := db.ExecContext(ctx,
+		`UPDATE detection_outbox SET attempts = ? WHERE id = ?`,
+		item.Attempts+1, item.ID); err != nil {
+		t.Fatalf("simulate a re-claim: %v", err)
+	}
+
+	if err := outbox.Fail(ctx, item); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+	if status := outboxStatus(t, db, ctx, item.ID); status != "processing" {
+		t.Fatalf("status = %s, want the newer claim to keep processing", status)
+	}
+}
+
+func TestOutboxCompleteIgnoresAFinishedItem(t *testing.T) {
+	db := testDB(t)
+	outbox := NewOutbox(db)
+	ctx := context.Background()
+
+	item := claimOneOutboxItem(t, outbox, ctx, "tx-stale-complete")
+	if err := outbox.Complete(ctx, []int64{item.ID}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if err := outbox.Complete(ctx, []int64{item.ID}); err != nil {
+		t.Fatalf("second complete: %v", err)
+	}
+	if status := outboxStatus(t, db, ctx, item.ID); status != "done" {
+		t.Fatalf("status = %s, want done", status)
+	}
+}
+
+func claimOneOutboxItem(t *testing.T, outbox *Outbox, ctx context.Context, transactionID string) ports.OutboxItem {
+	t.Helper()
+
+	if err := outbox.EnqueueWithTransaction(ctx, domain.Transaction{
+		ID: domain.TransactionID(transactionID), UserID: "user-1", MerchantID: "netflix", MerchantName: "Netflix",
+		MCC: domain.MCCRecurringBilling, AmountMinor: 1500, Currency: "USD", AuthorizedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	items, err := outbox.ClaimBatch(ctx, 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("claim: %d items (%v)", len(items), err)
+	}
+	return items[0]
+}
+
+func outboxStatus(t *testing.T, db *sql.DB, ctx context.Context, id int64) string {
+	t.Helper()
+
+	var status string
+	if err := db.QueryRowContext(ctx,
+		`SELECT status FROM detection_outbox WHERE id = ?`, id).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	return status
+}
+
+func TestLifecycleSyncQueueRequeueStaleFailsExhaustedAttempts(t *testing.T) {
+	db := testDB(t)
+	queue := NewLifecycleSyncQueue(db)
+	ctx := context.Background()
+
+	if err := queue.Enqueue(ctx, ports.LifecycleSyncTask{EntityType: "token", EntityID: "vtok-poison", Action: "terminate"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	claimed, err := queue.ClaimBatch(ctx, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %d tasks (%v)", len(claimed), err)
+	}
+	task := claimed[0]
+	if _, err := db.ExecContext(ctx,
+		`UPDATE lifecycle_sync_outbox SET attempts = ?, updated_at = ? WHERE id = ?`,
+		maxLifecycleSyncAttempts, time.Now().UTC().Add(-time.Minute), task.ID); err != nil {
+		t.Fatalf("exhaust attempts: %v", err)
+	}
+
+	requeued, err := queue.RequeueStale(ctx, 0)
+	if err != nil || requeued != 1 {
+		t.Fatalf("expected 1 stale task reprocessed, got %d (%v)", requeued, err)
+	}
+	var status string
+	if err := db.QueryRowContext(ctx,
+		`SELECT status FROM lifecycle_sync_outbox WHERE id = ?`, task.ID).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %s, want failed", status)
+	}
+	if pending, err := queue.PendingCount(ctx); err != nil || pending != 0 {
+		t.Fatalf("an exhausted task must not stay pending, got %d (%v)", pending, err)
+	}
+}
+
 func TestLifecycleSyncQueueRoundTrip(t *testing.T) {
 	db := testDB(t)
 	queue := NewLifecycleSyncQueue(db)
